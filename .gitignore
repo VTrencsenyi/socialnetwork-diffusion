@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# Secrets — never commit
+# ---------------------------------------------------------------------------
+keys.json
+.env
+.env.*
+!keys.example.json
+
+# ---------------------------------------------------------------------------
+# Raw data (~2 GB). Re-downloadable from Harvard Dataverse instead — see
+# README.md "Data setup". Keeping it out of git keeps the clone small.
+# ---------------------------------------------------------------------------
+diffusion-science-data/
+
+# ---------------------------------------------------------------------------
+# Papers — published PDFs, not ours to redistribute. README links the sources.
+# ---------------------------------------------------------------------------
+papers/
+
+# ---------------------------------------------------------------------------
+# Generated artefacts — rebuild with `python -m src.tools hh-features`
+# ---------------------------------------------------------------------------
+output/
+
+# NOTE: figures/ is deliberately *tracked* — the figures are a deliverable and
+# the write-up links them. Add `figures/` here if you'd rather they be rebuilt.
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
