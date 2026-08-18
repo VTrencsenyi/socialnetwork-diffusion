@@ -23,7 +23,7 @@ from tqdm.auto import tqdm
 try:
     from ..llm import load_client, one_call
 except ImportError:  # running as a script, not a package
-    # `python src/pilot/adoption_rate_pilot.py` puts src/pilot on sys.path, not src,
+    # `python src/pilot/transmission_rate_pilot.py` puts src/pilot on sys.path, not src,
     # so the sibling module is only importable once src itself is on it.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from llm import load_client, one_call  # type: ignore[no-redef]
@@ -53,8 +53,12 @@ Your household has been described as follows:
 {narrative}
 """
 
-INFORMER = "You were told about the programme by a neighbour."
-INFORMER_PROFILE = """
+IS_LEADER = "The organisation's staff identified your household to have a 'leader' role in the village through occupation. You were asked to spread information."
+JOINER = "Your household has decided to join the programme."
+NON_JOINER = "Your household has decided not to join the programme."
+
+INFORMEE = "You can now tell your neighbour about the microfinance services available in the village if you see fit."
+INFORMEE_PROFILE = """
 Your neighbour has the following characteristics:
 - Religion: {religion}
 - Caste: {caste}
@@ -67,16 +71,15 @@ Your neighbour has the following characteristics:
 - Access to a bank account: {bank_account}
 - Occupation: {occupation}
 """
-INFORMER_NARRATIVE = """
+INFORMEE_NARRATIVE = """
 Your neighbour has been described as follows:
 {narrative}
 """
-JOINER = "They joined the programme."
-NON_JOINER = "They have not joined the programme."
 
-FORMAT_INSTRUCTION = "Does your household join the programme? You must highlight your decision with the token {Y} for yes or {N} for no at the end of your response, on a new line, and nothing else."
+FORMAT_INSTRUCTION = "Do you wish to say something to your neighbour? You must highlight your decision with the token {Y} for yes or {N} for no at the end of your response, on a new line, and nothing else."
+
 MOA_INSTRUCTION = """
-You should decide whether your household joins by answering the following three questions:
+Do you wish to say something to your neighbour? Respond by answering the following three questions:
 1. What kind of situations is this?
 2. What kind of person am I?
 3. What would a person like me do in a situation like this?
@@ -85,17 +88,17 @@ You must highlight your decision with the token {Y} for yes or {N} for no at the
 """
 
 DT_INSTRUCTION = """
-You should decide whether your household joins by conducting a decision-theoretic analysis.
+You should decide whether you inform your neighbour by conducting a decision-theoretic analysis.
 
-Use everything you have been told and your own subjective judgement to fill out a decision matrix over two actions -- joining the programme and not joining it -- and three states of nature describing what taking a loan would do for your household: it turns out beneficial, it turns out to have limited effect, or it turns out harmful.
+Use everything you have been told and your own subjective judgement to fill out a decision matrix over two actions -- informing your neighnour about the programme or not -- and two states of nature describing what they will do: they end up joining the programme or they end up not joining.
 
-For each state, estimate the probability that it is the state you are in, give the utility your household would receive under that state from each of the two actions, and state the evidence that justifies those numbers. The three probabilities must sum to 1.
+For each state, estimate the probability that it is the state you are in, give the utility you would receive under that state from each of the two actions, and state the evidence that justifies those numbers. The three probabilities must sum to 1.
 
-Then give your decision: Y if your household joins the programme, N if it does not.
+Then give your decision: Y if you decide to inform your neighbour, N if you decide not to inform them.
 """
 
 # The three states of nature, in the order they are asked for and reported.
-DT_STATES = ("beneficial", "limited_effect", "harmful")
+DT_STATES = ("they_join", "they_dont_join")
 
 # One state's row of the decision matrix.
 _DT_STATE_SCHEMA = {
@@ -104,8 +107,8 @@ _DT_STATE_SCHEMA = {
     "required": ["probability", "Y_utility", "N_utility", "evidence"],
     "properties": {
         "probability": {"type": "number", "description": "The probability that this is the state of nature."},
-        "Y_utility": {"type": "number", "description": "The utility of joining the programme under this state."},
-        "N_utility": {"type": "number", "description": "The utility of not joining the programme under this state."},
+        "Y_utility": {"type": "number", "description": "The utility of informing the neighbour under this state."},
+        "N_utility": {"type": "number", "description": "The utility of not informing the neighbour under this state."},
         "evidence": {
             "type": "array",
             "items": {"type": "string"},
@@ -116,9 +119,9 @@ _DT_STATE_SCHEMA = {
 
 # `states` is keyed by state name rather than a list of state objects, because
 # that is the one shape strict mode can guarantee is complete: `minItems` and
-# `maxItems` are rejected keywords, so an array could come back with two states
-# or with `harmful` twice, whereas an object with three required properties and
-# `additionalProperties: false` can only come back as all three, once each.
+# `maxItems` are rejected keywords, so an array could come back with one state
+# or with `they_join` twice, whereas an object with two required properties and
+# `additionalProperties: false` can only come back as both, once each.
 DT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -138,10 +141,15 @@ DT_SCHEMA = {
 # design label is D2 or it is not, and the schema is the same for all of them.
 DT_FORMAT = {"format": {"type": "json_schema", "name": "dt_analysis", "strict": True, "schema": DT_SCHEMA}}
 
-# How far the three elicited probabilities may miss 1.0 before the distribution is
+# How far the two elicited probabilities may miss 1.0 before the distribution is
 # reported as invalid. Strict mode cannot express the constraint -- `minimum`,
 # `maximum` and arithmetic are all outside JSON Schema's strict subset -- so this
 # is checked on the way back rather than enforced on the way out.
+#
+# Over two states this is a weaker check than it was over three: one probability
+# determines the other, so a model that fills the second in as `1 - p` passes it
+# without having said anything. `p_valid` is worth reading as "the pair is a
+# distribution at all", not as evidence that the pair was thought about.
 DT_PROBABILITY_TOLERANCE = 0.02
 
 
@@ -151,11 +159,28 @@ class LLMs(Enum):
     GROK_4_2 = "grok-4.20-0309-non-reasoning"
 
 VILLAGE = 6
-# They are from the same subcaste and are non leaders, so in-group and influence factors are mitigated here.
+# Four egos: an adopter and a non-adopter, each in a leader and a non-leader variant,
+# so the leader line of axis L is true of the household it is attached to. All four
+# are NAYAKA and Hindu, both surveyed and in the giant component, which holds the
+# in-group factor fixed across the arms; `has_leader` is 1 for the two leader ids and
+# 0 for the other two.
 SAMPLE_HH_ADOPT_SELF = 6026
-SAMPLE_HH_ADOPT_OTHER = 6032 
+SAMPLE_HH_ADOPT_SELF_LEADER = 6037
 SAMPLE_HH_NON_ADOPT_SELF = 6039
-SAMPLE_HH_NON_ADOPT_OTHER = 6099
+SAMPLE_HH_NON_ADOPT_SELF_LEADER = 6030
+
+# A confound, accepted rather than fixed: both leader households have a savings group
+# and a bank account and neither non-leader household has either, so under A1 and A2
+# the leader contrast and the SHG-plus-savings contrast are the same contrast and no
+# test here separates them. Read the L axis as "a leader household, as this data has
+# them" rather than as the effect of the line on its own.
+
+# The neighbour, the same household for both arms: axis B then changes the prompt
+# identically on each side and the arms are separated by the ego alone. It borders
+# 6039 in `allVillageRelationships_HH_vilno_6` and none of the other three -- no
+# household in village 6 borders all four -- so "your neighbour" here frames a
+# hypothetical edge rather than naming one the pilot ran over.
+INFORMEE_HH = 6099
 
 # The CLEANED table and the profiles built from it: both carry the merged subcaste
 # spelling, so two households of one subcaste are named the same way in the fields
@@ -178,12 +203,13 @@ PARSING_ERROR = "PARSING ERROR"
 # defaults rather than under a number picked for one of them.
 #
 # One number for all 54 designs rather than one per instruction: a cap that moved
-# with the design would be a second thing changing between arms. 1024 because DT
-# is what sets the floor -- its first live call spent 477 tokens on the *base*
-# case, the shortest prompt in the grid, and a reasoning model's thinking comes
-# out of the same budget as its answer. The plain and MOA designs never came near
-# 512 (their maxima over 700 calls each were 245 and 391), so raising it changes
-# what they can do, not what they did.
+# with the design would be a second thing changing between arms. 1024 is inherited
+# from the adoption-rate pilot, where DT set the floor -- its first live call spent
+# 477 tokens on that grid's shortest prompt, and a reasoning model's thinking comes
+# out of the same budget as its answer. Nothing in *this* grid has been measured:
+# the prompts are longer, every one of them carries the ego's status line, and the
+# DT matrix is a different shape. The number is provisional until the first live DT
+# call says what it costs.
 MAX_OUTPUT_TOKENS = 1024
 
 # Which block of keys.json each model is reached through. All three speak the OpenAI
@@ -306,7 +332,7 @@ def extract_decision(response: str) -> str:
 def parse_dt(response: str) -> dict | None:
     """The decision matrix in a DT response, or None if there is no usable one.
 
-    Strict structured output guarantees the shape -- the three states, their four
+    Strict structured output guarantees the shape -- the two states, their four
     fields each, the types, and a decision that is `Y` or `N` -- so this is not a
     lenient parse of a model's idea of JSON. What it guards against is the two
     ways a well-formed request still comes back unusable: a response truncated by
@@ -314,9 +340,9 @@ def parse_dt(response: str) -> dict | None:
     schema was not applied to at all.
 
     The arithmetic the schema cannot express is *not* grounds for rejection. A
-    probability outside [0, 1] or a set of three that does not sum to 1 makes the
+    probability outside [0, 1] or a pair that does not sum to 1 makes the
     distribution invalid, but the decision is still the model's answer to the same
-    question every other design asks, and dropping it out of the adoption rate
+    question every other design asks, and dropping it out of the transmission rate
     would bias that rate by a property of the analysis rather than of the answer.
     Those responses come back parsed, and `dt_frame` flags them.
     """
@@ -395,40 +421,61 @@ def has_adopted(hhid: int) -> bool:
 
 def get_prompt(
     profile_enhancement: str = "",
-    informer_enhancement: str = "",
-    endorsement_enhancement: str = "",
+    informee_enhancement: str = "",
+    leader: str = "",
     instruction: str = "",
     hhid: int | None = None,
-    informer_hhid: int | None = None,
+    informee_hhid: int | None = None,
 ) -> str:
-    base_context = BASE_CONTEXT
+    """One design's prompt for one ego, in the order the blocks are declared above.
 
+    Base context, then the ego's own profile (axis A), then the leader line (axis L),
+    then the ego's own adoption status, then the neighbour and its profile (axis B),
+    then the instruction (axis D).
+
+    Two of those blocks are not axes. The status line is in every prompt because a
+    household always knows whether it joined, which is also what makes every design
+    in the grid a two-arm design. The `INFORMEE` line is in every prompt because it
+    is the question's setup rather than an enhancement of it: at B0 the model is
+    asked whether it wants to tell "your neighbour" with no neighbour described, and
+    without this line there would be no neighbour in the prompt at all.
+    """
     assert profile_enhancement in ["", "DEMOGRAPHIC", "NARRATIVE"], "Invalid profile enhancement option"
-    assert informer_enhancement in ["", "DEMOGRAPHIC", "NARRATIVE"], "Invalid informer enhancement option"
-    assert endorsement_enhancement in ["", "ENDORSEMENT"], "Invalid endorsement enhancement option"
+    assert informee_enhancement in ["", "DEMOGRAPHIC", "NARRATIVE"], "Invalid informee enhancement option"
+    assert leader in ["", "LEADER"], "Invalid leader option"
     assert instruction in ["", "MOA", "DT"], "Invalid instruction option"
+    if hhid is None:
+        raise ValueError("every prompt is one ego's: its own adoption status is always disclosed")
+    if informee_enhancement and informee_hhid is None:
+        raise ValueError("informee_enhancement needs an informee_hhid: there is no neighbour to describe")
 
-    prompt_parts = [base_context]
+    prompt_parts = [BASE_CONTEXT]
 
     # Axis A: the deciding household describes itself.
     if profile_enhancement:
-        if hhid is None:
-            raise ValueError("profile_enhancement needs an hhid: there is no household to describe")
         template = DEMOGRAPHIC_ENHANCEMENT if profile_enhancement == "DEMOGRAPHIC" else NARRATIVE_ENHANCEMENT
         prompt_parts.append(template.format(**get_household(hhid)))
 
-    # Axes B and C both speak about the neighbour, so the informer line is added
-    # once for either, and the endorsement follows that household's own status:
-    # the adopter neighbour joined, the non-adopter one did not.
-    if informer_enhancement or endorsement_enhancement:
-        if informer_hhid is None:
-            raise ValueError("informer_enhancement/endorsement_enhancement needs an informer_hhid")
-        prompt_parts.append(INFORMER)
-        if informer_enhancement:
-            template = INFORMER_PROFILE if informer_enhancement == "DEMOGRAPHIC" else INFORMER_NARRATIVE
-            prompt_parts.append(template.format(**get_household(informer_hhid)))
-        if endorsement_enhancement:
-            prompt_parts.append(JOINER if has_adopted(informer_hhid) else NON_JOINER)
+    # Axis L: the MFI's own briefing, which BCDJ describe as the treatment -- leaders
+    # were invited to a meeting and asked to spread the word, so a leader household
+    # knows it is one. It sits with the base framing rather than with the profile, so
+    # a design carrying no profile at all still has both levels of it.
+    if leader:
+        prompt_parts.append(IS_LEADER)
+
+    # Not an axis: the ego knows its own decision either way, and this line is what
+    # makes the adopter and non-adopter arms differ in every design. It follows the
+    # household's real `_adopted`, so the arm and the line cannot disagree.
+    prompt_parts.append(JOINER if has_adopted(hhid) else NON_JOINER)
+
+    # Not an axis either: the question is about a neighbour, so the neighbour has to
+    # be in the prompt before axis B decides how much is said about them.
+    prompt_parts.append(INFORMEE)
+
+    # Axis B: who that neighbour is.
+    if informee_enhancement:
+        template = INFORMEE_PROFILE if informee_enhancement == "DEMOGRAPHIC" else INFORMEE_NARRATIVE
+        prompt_parts.append(template.format(**get_household(informee_hhid)))
 
     # Axis D: the MOA and DT instructions replace the plain one rather than adding
     # to it, so exactly one of the three ends every prompt. MOA carries its own
@@ -442,13 +489,13 @@ def get_prompt(
     # Filter out empty strings and join the parts with two newlines
     return "\n\n".join(part.strip() for part in prompt_parts if part.strip())
 
-OUTPUT_DIR = Path("output/pilot")
+OUTPUT_DIR = Path("output/pilot/transmission")
 
 CSV_COLUMNS = (
     "repetition",
     "sample",
     "ego_hhid",
-    "informer_hhid",
+    "informee_hhid",
     "prompt",
     "response",
     "decision",
@@ -458,51 +505,86 @@ CSV_COLUMNS = (
 )
 
 
-def design_label(
-    profile_enhancement: str = "",
-    informer_enhancement: str = "",
-    endorsement_enhancement: str = "",
-    instruction: str = "",
-) -> str:
-    """`A1B0C1D0` -- one digit per axis: ego profile, informer profile, endorsement, instruction.
+# The grid, in the order a label writes it: the letter, the keyword `get_prompt`
+# takes the level under, and the levels in digit order. One table rather than four
+# constants and a hand-written format string, because the label's geometry is read
+# back in five other places -- the filename pattern, the module positions, the DT
+# row filter, the CLI's label parser -- and every one of them derived from here is
+# one that cannot drift when an axis is added.
+#
+# The instruction axis is last on purpose: `dt_frame` selects DT rows off the tail
+# of the label, and `D2` is a stable name for that level only while nothing follows
+# it. A new axis goes before D.
+AXES = (
+    ("A", "profile_enhancement", ("", "DEMOGRAPHIC", "NARRATIVE")),
+    ("B", "informee_enhancement", ("", "DEMOGRAPHIC", "NARRATIVE")),
+    ("L", "leader", ("", "LEADER")),
+    ("D", "instruction", ("", "MOA", "DT")),
+)
 
-    The digit is the level's index in that axis's tuple, so `D2` was added to the
-    end of the instruction axis rather than anywhere in it: every label written
-    before DT existed still names the design it named then.
+# The design tuple's field order, for pulling one axis's level out of a design by
+# name rather than by a literal index.
+AXIS_KEYWORDS = tuple(keyword for _letter, keyword, _levels in AXES)
+
+# Where each axis's digit sits in a label: `A1B0L1D2` has A at 1, B at 3, L at 5, D at 7.
+AXIS_POSITIONS = {letter: 2 * index + 1 for index, (letter, _keyword, _levels) in enumerate(AXES)}
+# What a label looks like, for the filename matcher: `A\dB\dL\dD\d`.
+LABEL_PATTERN = "".join(f"{letter}\\d" for letter, _keyword, _levels in AXES)
+# The instruction level whose responses carry a decision matrix.
+DT_DIGIT = str(AXES[-1][2].index("DT"))
+
+
+def design_label(*levels: str) -> str:
+    """`A1B0L1D2` -- one digit per axis, in `AXES` order.
+
+    The digit is the level's index in that axis's tuple, so a level appended to an
+    axis leaves every label already written naming the design it named then.
     """
-    levels = {"": 0, "DEMOGRAPHIC": 1, "NARRATIVE": 2}
-    instructions = {"": 0, "MOA": 1, "DT": 2}
-    return (
-        f"A{levels[profile_enhancement]}"
-        f"B{levels[informer_enhancement]}"
-        f"C{int(bool(endorsement_enhancement))}"
-        f"D{instructions[instruction]}"
+    if len(levels) != len(AXES):
+        raise ValueError(f"expected {len(AXES)} levels, one per axis, got {len(levels)}")
+    return "".join(
+        f"{letter}{axis_levels.index(level)}"
+        for (letter, _keyword, axis_levels), level in zip(AXES, levels)
     )
+
+
+def label_digit(label: str, letter: str) -> str:
+    """The digit one axis takes in a design label, e.g. `label_digit("A1B0L1D2", "L") == "1"`."""
+    return str(label)[AXIS_POSITIONS[letter]]
 
 
 def log_path(llm: LLMs, label: str) -> Path:
     return OUTPUT_DIR / f"{llm.name.lower()}_{label}.csv"
 
 
-def design_samples(
-    profile_enhancement: str = "",
-    informer_enhancement: str = "",
-    endorsement_enhancement: str = "",
-) -> dict[str, tuple[int | None, int | None]]:
-    """Which (ego, informer) households a design is run over, per sample arm.
+# Which ego each arm is, per leader level. The level selects the household as well
+# as the line, so the line is true of whoever it is attached to.
+SAMPLE_EGOS = {
+    "adopter": {"": SAMPLE_HH_ADOPT_SELF, "LEADER": SAMPLE_HH_ADOPT_SELF_LEADER},
+    "non_adopter": {"": SAMPLE_HH_NON_ADOPT_SELF, "LEADER": SAMPLE_HH_NON_ADOPT_SELF_LEADER},
+}
 
-    Every axis but the base case renders differently for an adopter household than
-    for a non-adopter one, so those designs have two arms. The base case reads the
-    same either way, so it has one, `none` -- which is what makes it the control.
-    The instruction axis is not asked for: MOA and DT change how the question is
-    put, not which household it is put to.
+
+def design_samples(leader: str = "") -> dict[str, tuple[int, int]]:
+    """Which (ego, informee) households a design is run over, per sample arm.
+
+    Two arms for every design in the grid. The ego's own adoption status is not an
+    axis -- a household always knows whether it joined -- so every prompt carries
+    `JOINER` or `NON_JOINER`, and no design renders the same for both samples.
+
+    That is deliberate, and it costs this grid the one-arm control the adoption-rate
+    pilot had. There is no design here that both arms see identically, so nothing
+    inside the grid estimates how often Fisher's exact separates these two samples
+    by chance: the BH correction across the 54 tests is the whole guard, which is
+    worth remembering when reading a q.
+
+    Only the leader level is asked for. It decides the ego; the informee is fixed;
+    and the profile and instruction axes change what the ego is told and how the
+    question is put, not which household it is put to.
     """
-    if not (profile_enhancement or informer_enhancement or endorsement_enhancement):
-        return {"none": (None, None)}
-    return {
-        "adopter": (SAMPLE_HH_ADOPT_SELF, SAMPLE_HH_ADOPT_OTHER),
-        "non_adopter": (SAMPLE_HH_NON_ADOPT_SELF, SAMPLE_HH_NON_ADOPT_OTHER),
-    }
+    if leader not in ("", "LEADER"):
+        raise ValueError(f"invalid leader level {leader!r}")
+    return {arm: (egos[leader], INFORMEE_HH) for arm, egos in SAMPLE_EGOS.items()}
 
 
 def _next_repetition(path: Path, sample: str) -> int:
@@ -527,19 +609,18 @@ def _append_row(path: Path, row: dict[str, object]) -> None:
 def run_agent_with_config(
     llm: LLMs,
     profile_enhancement: str = "",
-    informer_enhancement: str = "",
-    endorsement_enhancement: str = "",
+    informee_enhancement: str = "",
+    leader: str = "",
     instruction: str = "",
     reps: int = 1,
     progress: tqdm | None = None,
 ) -> Path:
     """One prompt design, `reps` times per sample, appended to its own CSV.
 
-    Every axis but the base case renders differently for an adopter household than
-    for a non-adopter one, so a design is run twice -- once per sample -- into one
-    file, with the `sample` column telling them apart. That is the comparison the
-    study is after, so the two arms belong in the same place. The base case reads
-    the same either way and is run once, as `none`.
+    Every design renders differently for the adopter ego than for the non-adopter
+    one -- the status line is in all of them -- so every design is run twice, once
+    per sample, into one file, with the `sample` column telling them apart. That is
+    the comparison the study is after, so the two arms belong in the same place.
 
     Repetitions stack: an existing file is appended to and the numbering picks up
     where each sample left off, so calling this again asks for `reps` more.
@@ -547,23 +628,24 @@ def run_agent_with_config(
     `progress` is `run_pilot`'s bar, advanced one step per API call. It is optional
     because a single design run from a notebook has nothing to advance.
     """
-    samples = design_samples(profile_enhancement, informer_enhancement, endorsement_enhancement)
+    samples = design_samples(leader)
 
-    path = log_path(llm, design_label(profile_enhancement, informer_enhancement, endorsement_enhancement, instruction))
+    path = log_path(llm, design_label(profile_enhancement, informee_enhancement, leader, instruction))
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for sample, (ego_hhid, informer_hhid) in samples.items():
-        # Only the households the prompt actually names get logged, so the columns
-        # say which record the model saw rather than which one the sample stands for.
-        ego_hhid = ego_hhid if profile_enhancement else None
-        informer_hhid = informer_hhid if (informer_enhancement or endorsement_enhancement) else None
+    for sample, (ego_hhid, informee_hhid) in samples.items():
+        # The ego is logged for every row: its status line is in every prompt, and
+        # under axis L the level chose which of the arm's two households it is. The
+        # neighbour is only described under axis B, so its id is logged only where
+        # the prompt actually carried it.
+        informee_hhid = informee_hhid if informee_enhancement else None
         prompt = get_prompt(
             profile_enhancement,
-            informer_enhancement,
-            endorsement_enhancement,
+            informee_enhancement,
+            leader,
             instruction,
             ego_hhid,
-            informer_hhid,
+            informee_hhid,
         )
         first = _next_repetition(path, sample)
         for repetition in range(first, first + reps):
@@ -573,8 +655,8 @@ def run_agent_with_config(
                 {
                     "repetition": repetition,
                     "sample": sample,
-                    "ego_hhid": ego_hhid if ego_hhid is not None else "",
-                    "informer_hhid": informer_hhid if informer_hhid is not None else "",
+                    "ego_hhid": ego_hhid,
+                    "informee_hhid": informee_hhid if informee_hhid is not None else "",
                     "prompt": prompt,
                     "response": response,
                     "decision": decision,
@@ -592,31 +674,25 @@ def run_agent_with_config(
     return path
 
 
-# The levels of each axis, in the order `design_label` numbers them.
-PROFILE_LEVELS = ("", "DEMOGRAPHIC", "NARRATIVE")
-INFORMER_LEVELS = ("", "DEMOGRAPHIC", "NARRATIVE")
-ENDORSEMENT_LEVELS = ("", "ENDORSEMENT")
 # DT is a level of the instruction axis rather than an axis of its own, because it
 # and MOA cannot both be in effect: one instruction ends the prompt. As a fifth
 # axis the two would form a cell that had to be excluded from the grid everywhere
 # it is generated, counted, resolved or rendered; as one axis of three levels the
 # combination cannot be expressed in the first place.
-INSTRUCTION_LEVELS = ("", "MOA", "DT")
 
 
 def all_designs() -> list[tuple[str, str, str, str]]:
-    """The full factorial, 3 x 3 x 2 x 3 = 54 designs, base case first."""
-    return list(itertools.product(PROFILE_LEVELS, INFORMER_LEVELS, ENDORSEMENT_LEVELS, INSTRUCTION_LEVELS))
+    """The full factorial, 3 x 3 x 2 x 3 = 54 designs, the leanest first."""
+    return list(itertools.product(*(levels for _letter, _keyword, levels in AXES)))
 
 
 def planned_calls(llms: list[LLMs], designs: list[tuple[str, str, str, str]], reps: int) -> int:
     """How many API calls a `run_pilot` with these arguments will make.
 
-    Not simply designs x reps: every design but the base case is run once per
-    sample, and a base case only once.
+    Two arms for every design, with no one-arm control among them: see
+    `design_samples` for why the grid no longer has one.
     """
-    per_model = sum(1 if not (a or b or c) else 2 for a, b, c, _ in designs)
-    return per_model * reps * len(llms)
+    return 2 * len(designs) * reps * len(llms)
 
 
 def run_pilot(
@@ -626,7 +702,8 @@ def run_pilot(
 ) -> list[Path]:
     """Every design on every model, `reps` times each, one CSV per pair.
 
-    Defaults to the whole study: all three models over the full 54-design grid.
+    Defaults to the whole study: all three models over the full 54-design grid, both
+    arms of every design.
     Repetitions stack the same way they do for a single config, so re-running this
     adds `reps` more of everything rather than starting over.
 
@@ -687,10 +764,10 @@ def run_pilot(
 
 
 # --------------------------------------------------------------------------
-# Reading the logs back, and the adoption-rate plot
+# Reading the logs back, and the transmission-rate plot
 # --------------------------------------------------------------------------
 
-FIGURE_DIR = Path("figures/pilot")
+FIGURE_DIR = Path("figures/pilot/transmission")
 
 # plots.py's light surface and categorical slots, so a pilot figure sits next to
 # the network ones without a second palette.
@@ -704,14 +781,24 @@ SAMPLE_COLOURS = {"adopter": "#eb6834", "non_adopter": "#2a78d6", "none": "#c3c2
 # plots.py's categorical slot 8, the one red in the palette, kept for the one thing
 # on these figures that is a warning rather than a category: an inverted separation.
 WARNING = "#e34948"
-SAMPLE_LABELS = {"adopter": "adopter sample", "non_adopter": "non-adopter sample", "none": "base case"}
+# BCDJ's own names for the two rates, because the arms *are* their qP and qN: an
+# informed household that took the loan transmits at qP, one that did not at qN.
+SAMPLE_LABELS = {
+    "adopter": "adopter ego (qP)",
+    "non_adopter": "non-adopter ego (qN)",
+    "none": "arm-invariant",
+}
+# `none` is kept in the three dicts above and in this order without any design
+# producing it: every design in this grid has two arms (`design_samples`). It costs
+# nothing to leave the drawing code able to render a one-arm design and saves a
+# reader wondering whether a missing arm would have been plotted.
 SAMPLE_ORDER = ("adopter", "non_adopter", "none")
 
 
 # What a log file is called: `<model>_<design label>.csv`. Matched rather than
 # globbed for, because anything else written into the same directory -- a saved test
 # table, a spreadsheet -- would otherwise be read back as a model and a design.
-_LOG_STEM = re.compile(r"^(?P<model>.+)_(?P<design>A\dB\dC\dD\d)$")
+_LOG_STEM = re.compile(rf"^(?P<model>.+)_(?P<design>{LABEL_PATTERN})$")
 
 
 def load_results(llm: LLMs | None = None, output_dir: Path = OUTPUT_DIR) -> pd.DataFrame:
@@ -724,7 +811,9 @@ def load_results(llm: LLMs | None = None, output_dir: Path = OUTPUT_DIR) -> pd.D
     frames = []
     for path in sorted(output_dir.glob(pattern)):
         # The model name has its own underscores (gpt_5_4_nano); the design label
-        # never does, which is what makes the split unambiguous.
+        # never does, which is what makes the split unambiguous. Anything logged
+        # under the adoption-rate pilot's four-axis labels does not match and is
+        # skipped, which is the second guard on the two grids not being pooled.
         match = _LOG_STEM.match(path.stem)
         if match is None:
             continue
@@ -737,8 +826,11 @@ def load_results(llm: LLMs | None = None, output_dir: Path = OUTPUT_DIR) -> pd.D
     return pd.concat(frames, ignore_index=True)
 
 
-def adoption_rates(results: pd.DataFrame) -> pd.DataFrame:
+def transmission_rates(results: pd.DataFrame) -> pd.DataFrame:
     """One row per (llm, design, sample): the share of (Y) answers and its SE.
+
+    (Y) here means the ego chose to tell its neighbour, so the rate is a
+    transmission rate and the two arms are estimates of BCDJ's qP and qN.
 
     The rate is over *answered* repetitions -- a PARSING ERROR is not a refusal, so
     counting it as one would drag the rate down for whichever designs the model
@@ -754,15 +846,15 @@ def adoption_rates(results: pd.DataFrame) -> pd.DataFrame:
     for (llm, design, sample), group in results.groupby(["llm", "design", "sample"], sort=False):
         answered = group[group["decision"] != PARSING_ERROR]
         n = len(answered)
-        adopted = int((answered["decision"] == YES_TOKEN).sum())
-        rate = adopted / n if n else float("nan")
+        told = int((answered["decision"] == YES_TOKEN).sum())
+        rate = told / n if n else float("nan")
         rows.append(
             {
                 "llm": llm,
                 "design": design,
                 "sample": sample,
                 "n": n,
-                "adopted": adopted,
+                "told": told,
                 "rate": rate,
                 "se": math.sqrt(rate * (1.0 - rate) / n) if n else float("nan"),
                 "unparsed": len(group) - n,
@@ -779,9 +871,9 @@ def _draw_rates(
     title: str,
     flags: dict[str, str] | None = None,
 ) -> None:
-    """One model's grid: two bars per design, one per sample, base case centred.
+    """One model's grid: two bars per design, one per sample.
 
-    `flags` appends a marker to a design's tick -- what `adoption_rates_fisher` uses
+    `flags` appends a marker to a design's tick -- what `transmission_rates_fisher` uses
     to say which of the separators it plots came out the wrong way round. The
     unparsed marker is not in it: that one is read off the table itself, so every
     caller gets it whether or not it thought to ask.
@@ -829,7 +921,7 @@ def _draw_rates(
     # than borrowed -- the y ticks still stop at 1.0, which is where the scale ends.
     ax.set_ylim(0.0, 1.28)
     ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
-    ax.set_ylabel("adoption rate", fontsize=9, color=INK_2)
+    ax.set_ylabel("transmission rate", fontsize=9, color=INK_2)
     ax.set_title(title, fontsize=11, color=INK, loc="left", pad=8)
     ax.set_facecolor(SURFACE)
     ax.grid(axis="y", color=HAIRLINE, linewidth=0.6, zorder=0)
@@ -841,22 +933,22 @@ def _draw_rates(
         ax.spines[side].set_color(HAIRLINE)
 
 
-def plot_adoption_rates(
+def plot_transmission_rates(
     llm: LLMs | None = None,
     rates: pd.DataFrame | None = None,
     outfile: Path | None = None,
 ) -> plt.Figure:
-    """The adoption rate of every design, with standard-error bars, one row per model.
+    """The transmission rate of every design, with standard-error bars, one row per model.
 
-    Reads whatever is in `output/pilot` unless a rate table is passed in -- so a
+    Reads whatever is in `OUTPUT_DIR` unless a rate table is passed in -- so a
     half-finished run plots the designs it has. Designs keep `all_designs()`'s
-    order rather than alphabetical, which puts the base case first and steps
+    order rather than alphabetical, which puts the leanest design first and steps
     through the axes in the order the labels number them.
 
     Pass `outfile` to write it; the figure is returned either way.
     """
     if rates is None:
-        rates = adoption_rates(load_results(llm))
+        rates = transmission_rates(load_results(llm))
     if rates.empty:
         raise ValueError("Nothing to plot: the rate table is empty")
 
@@ -890,7 +982,8 @@ def plot_adoption_rates(
     fig.text(
         0.005,
         0.005,
-        "bars: share of (Y) answers   whiskers: SE of a proportion, sqrt(p(1-p)/n)"
+        "bars: share of (Y) answers -- the ego told its neighbour"
+        "   whiskers: SE of a proportion, sqrt(p(1-p)/n)"
         "   *: design with unparsed responses, excluded from its rate",
         fontsize=7,
         color=MUTED,
@@ -912,14 +1005,28 @@ def plot_adoption_rates(
 # it decides what `significant` says and what the report prints.
 FDR_ALPHA = 0.05
 
+# BCDJ's own point estimates for the information model: an informed household that
+# took the loan passes the programme on at qP, one that did not at qN. Nothing here
+# is fitted to them and nothing is scored against them -- `docs/experiment_design.md`
+# §1.1 records that transmission is observed nowhere in the bundle, so there is no
+# recorded event to fit or to score. They are the reference the arms are *read
+# against*: the sign of qP - qN and the size of the ratio are what a usable prompt
+# design has to reproduce, and §5.3 keeps that a descriptive property of the design
+# rather than a result about fit.
+BCDJ_QP = 0.45
+BCDJ_QN = 0.09
+BCDJ_RATIO = BCDJ_QP / BCDJ_QN
+
 
 def _benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     """FDR-corrected p-values, in the order they came in.
 
-    Every design is one test of the same question, so the grid asks it 51 times per
-    model: at an uncorrected 0.05 we would expect between one and two designs to
+    Every design is one test of the same question, so the grid asks it 54 times per
+    model: at an uncorrected 0.05 we would expect between two and three designs to
     look like separators purely by chance -- exactly the mistake that would send the
-    main study off with the wrong prompt. Benjamini-Hochberg rather than Bonferroni
+    main study off with the wrong prompt. This grid has no one-arm design to check
+    that rate against internally (`design_samples`), which makes the correction the
+    only guard rather than one of two. Benjamini-Hochberg rather than Bonferroni
     because the designs share axes and are anything but independent, and because a
     pilot picking candidates can afford a controlled false-discovery rate.
     """
@@ -935,11 +1042,24 @@ def separation_floor(n_adopter: int, n_non_adopter: int) -> float:
     """The smallest p these repetition counts can produce: a perfect 2x2 split.
 
     Worth checking before reading any result off the grid. Ten repetitions per arm
-    can reach 1.1e-5, but a 7-vs-3 split -- a 40-point difference in adoption rate --
-    only reaches p = 0.18, which survives no correction at all. If the floor is
+    can reach 1.1e-5, but a 7-vs-3 split -- a 40-point difference in transmission
+    rate -- only reaches p = 0.18, which survives no correction at all. If the floor is
     close to alpha, the answer is more repetitions, not a different test.
     """
     return float(fisher_exact([[n_adopter, 0], [0, n_non_adopter]])[1])
+
+
+def _rate_ratio(adopter: float, non_adopter: float) -> float:
+    """qP / qN for one design, the quantity BCDJ put at 5.0.
+
+    Zero in the denominator is a real outcome rather than an error -- a design under
+    which the non-adopter ego never told anyone -- so it comes back as infinity when
+    the adopter arm told at all, and as nan when neither arm did and there is no
+    asymmetry to report either way.
+    """
+    if non_adopter == 0.0:
+        return float("nan") if adopter == 0.0 else float("inf")
+    return float(adopter / non_adopter)
 
 
 def design_tests(
@@ -947,25 +1067,37 @@ def design_tests(
     llm: LLMs | None = None,
     alpha: float = FDR_ALPHA,
 ) -> pd.DataFrame:
-    """Fisher's exact test per (model, design): does the adopter sample answer differently?
+    """Fisher's exact test per (model, design): does the adopter ego tell more often?
 
-    One 2x2 table per design -- adopter/non-adopter against joined/did not -- tested
+    One 2x2 table per design -- adopter/non-adopter against told/did not -- tested
     exactly rather than by chi-square, because ten binary repetitions per arm put
-    cells in the range where the chi-square approximation is not to be trusted. The
-    test is two-sided: a design that makes the *non*-adopter household keener is as
-    much a finding as the other direction, and `diff` carries the sign.
+    cells in the range where the chi-square approximation is not to be trusted.
 
-    A base case is not tested. It renders identically for both samples, so it has
-    only a `none` arm and there is nothing to compare -- which is what makes the
-    three of them, one per instruction, the controls for the other 51.
+    What a hit means here is narrower than in the adoption-rate pilot, and the
+    difference is worth stating rather than inheriting. There the outcome was
+    adoption, which the bundle records, so a design that separated the samples was
+    tracking something observed. Transmission is observed nowhere in the bundle
+    (`docs/experiment_design.md` §1.1), so no design here can be checked against a
+    recorded event. A hit says that the design makes the model's telling decision
+    respond to the ego's own adoption status -- the qP / qN split BCDJ identify
+    structurally, from adoption alone -- and `diff` and `ratio` say whether it
+    responds in their direction and by anything like their factor of five. That is
+    face validity for a prompt, and §5.3 keeps it out of any claim about fit.
 
-    Columns: the two rates and their counts, `diff` (adopter - non-adopter), the raw
-    `p`, the BH-corrected `q`, `significant` (q < alpha), and `floor`, the best p
-    those counts could have reached. Sorted by q, so the designs that separate the
-    samples come first.
+    The test is two-sided and `diff` carries the sign: a design that makes the
+    *non*-adopter ego keener is as much a finding as the other direction, and it
+    disqualifies the design rather than supporting it.
+
+    Every design in the grid is tested -- unlike the adoption grid this one has no
+    one-arm design (`design_samples`), so there is no untested reference here.
+
+    Columns: the two rates and their counts, `diff` (adopter - non-adopter), `ratio`
+    (adopter / non-adopter, against BCDJ's 5.0), the raw `p`, the BH-corrected `q`,
+    `significant` (q < alpha), and `floor`, the best p those counts could have
+    reached. Sorted by q, so the designs that separate the samples come first.
     """
     if rates is None:
-        rates = adoption_rates(load_results(llm))
+        rates = transmission_rates(load_results(llm))
 
     rows = []
     two_arm = rates[rates["sample"].isin(("adopter", "non_adopter"))]
@@ -977,8 +1109,8 @@ def design_tests(
         if min(adopter["n"], non_adopter["n"]) == 0:
             continue  # every repetition unparsed on one side
         table = [
-            [int(adopter["adopted"]), int(adopter["n"] - adopter["adopted"])],
-            [int(non_adopter["adopted"]), int(non_adopter["n"] - non_adopter["adopted"])],
+            [int(adopter["told"]), int(adopter["n"] - adopter["told"])],
+            [int(non_adopter["told"]), int(non_adopter["n"] - non_adopter["told"])],
         ]
         odds_ratio, p = fisher_exact(table, alternative="two-sided")
         rows.append(
@@ -990,6 +1122,7 @@ def design_tests(
                 "rate_adopter": adopter["rate"],
                 "rate_non_adopter": non_adopter["rate"],
                 "diff": adopter["rate"] - non_adopter["rate"],
+                "ratio": _rate_ratio(adopter["rate"], non_adopter["rate"]),
                 "odds_ratio": float(odds_ratio),
                 "p": float(p),
                 "floor": separation_floor(int(adopter["n"]), int(non_adopter["n"])),
@@ -998,7 +1131,7 @@ def design_tests(
 
     tests = pd.DataFrame(rows, columns=[
         "llm", "design", "n_adopter", "n_non_adopter", "rate_adopter",
-        "rate_non_adopter", "diff", "odds_ratio", "p", "floor",
+        "rate_non_adopter", "diff", "ratio", "odds_ratio", "p", "floor",
     ])
     if tests.empty:
         return tests.assign(q=pd.Series(dtype=float), significant=pd.Series(dtype=bool))
@@ -1010,13 +1143,26 @@ def design_tests(
     return tests.sort_values(["llm", "q", "p"], ignore_index=True)
 
 
+def _ratio_text(ratio: float) -> str:
+    """A rate ratio for the report: `4.2x`, `inf` where qN was zero, `--` where both were."""
+    if math.isnan(ratio):
+        return "--"
+    if math.isinf(ratio):
+        return "inf"
+    return f"{ratio:.1f}x"
+
+
 def significance_report(tests: pd.DataFrame | None = None, alpha: float = FDR_ALPHA) -> pd.DataFrame:
     """Print the grid's verdict per model, best design first, and return the tests.
 
-    "Best" is the design with the smallest corrected p -- the sharpest separation
-    between an adopter household's circumstances and a non-adopter's. Where several
+    "Best" is the design with the smallest corrected p -- the sharpest split between
+    what an adopter ego will pass on and what a non-adopter one will. Where several
     tie at the floor, `diff` breaks the tie, and among those the leanest design wins
     on grounds the test cannot see: fewer axes is less prompt for the same signal.
+
+    `ratio` is printed beside them against BCDJ's 5.0. It is a comparison and not a
+    test: there is nothing to test it against (`design_tests`), and a design landing
+    near 5.0 is a coincidence worth reporting rather than a replication.
     """
     if tests is None:
         tests = design_tests()
@@ -1045,11 +1191,15 @@ def significance_report(tests: pd.DataFrame | None = None, alpha: float = FDR_AL
             )
 
         shown = (hits if not hits.empty else group).head(10)
-        print(f"  {'design':<10}{'adopter':>9}{'non-adopt':>11}{'diff':>8}{'p':>10}{'q':>10}")
+        print(f"  BCDJ for comparison: qP {BCDJ_QP:.2f}, qN {BCDJ_QN:.2f}, ratio {BCDJ_RATIO:.1f}x")
+        print(
+            f"  {'design':<10}{'adopter':>9}{'non-adopt':>11}{'diff':>8}"
+            f"{'ratio':>8}{'p':>10}{'q':>10}"
+        )
         for _, row in shown.iterrows():
             print(
                 f"  {row['design']:<10}{row['rate_adopter']:>9.2f}{row['rate_non_adopter']:>11.2f}"
-                f"{row['diff']:>+8.2f}{row['p']:>10.3g}{row['q']:>10.3g}"
+                f"{row['diff']:>+8.2f}{_ratio_text(row['ratio']):>8}{row['p']:>10.3g}{row['q']:>10.3g}"
             )
         if hits.empty:
             print("  (none significant -- the ten closest are listed)")
@@ -1065,7 +1215,7 @@ def significance_report(tests: pd.DataFrame | None = None, alpha: float = FDR_AL
     return tests
 
 
-FISHER_FIGURE = FIGURE_DIR / "adoption_rates_fisher.png"
+FISHER_FIGURE = FIGURE_DIR / "transmission_rates_fisher.png"
 
 
 def separating_designs(tests: pd.DataFrame, model: str) -> list[str]:
@@ -1079,59 +1229,58 @@ def separating_designs(tests: pd.DataFrame, model: str) -> list[str]:
     return list(hits.sort_values(["q", "p"], kind="mergesort")["design"])
 
 
-def adoption_rates_fisher(
+def transmission_rates_fisher(
     llm: LLMs | None = None,
     rates: pd.DataFrame | None = None,
     tests: pd.DataFrame | None = None,
     alpha: float = FDR_ALPHA,
     outfile: Path | None = None,
 ) -> plt.Figure:
-    """The base cases and only the designs that separate the samples, one row per model.
+    """Only the designs that separate the samples, one row per model.
 
-    `plot_adoption_rates` puts all 54 designs on an axis at 7-point ticks, which is
-    the right figure for seeing the grid and the wrong one for seeing the answer.
-    This is the answer: the three base cases -- untested, since they render
-    identically for both samples, and therefore the reference the rest are read
-    against -- followed by the designs whose Fisher test survived BH correction, in
-    order of how sharply they separate.
+    `plot_transmission_rates` puts all 54 designs on an axis at 7-point ticks, which
+    is the right figure for seeing the grid and the wrong one for seeing the answer.
+    This is the answer: the designs whose Fisher test survived BH correction, in
+    order of how sharply they split the adopter ego from the non-adopter one.
 
-    A design that separates the samples the wrong way round -- the non-adopter
-    household came out keener -- is held back behind a red rule at the right, in its
-    own block. It is on the figure because the test found it and hiding it would
-    misreport the grid; it is behind the rule because it is not a candidate for the
-    main study, and reading it in q order alongside the usable designs would put it
-    forward as one.
+    There is no reference block. The adoption-rate pilot's version of this figure
+    opened with its three base cases, which were untested because they rendered
+    identically for both samples; every design in this grid carries the ego's status
+    line, so every one of them is tested and none is a reference (`design_samples`).
+
+    A design that separates the samples the wrong way round -- the non-adopter ego
+    came out keener, against BCDJ's qP > qN -- is held back behind a red rule at the
+    right, in its own block. It is on the figure because the test found it and hiding
+    it would misreport the grid; it is behind the rule because it is not a candidate
+    for the main study, and reading it in q order alongside the usable designs would
+    put it forward as one.
 
     Pass `outfile` to write it; the figure is returned either way.
     """
     if rates is None:
-        rates = adoption_rates(load_results(llm))
+        rates = transmission_rates(load_results(llm))
     if rates.empty:
         raise ValueError("Nothing to plot: the rate table is empty")
     if tests is None:
         tests = design_tests(rates=rates, alpha=alpha)
     if tests.empty:
-        raise ValueError("No two-arm design has been tested yet: there is nothing to select from")
-
-    # Grid order for the base cases -- D0, D1, D2 -- so the instruction axis reads
-    # left to right, the one place on this figure where the grid's order still means
-    # something.
-    base_present = set(rates.loc[rates["sample"] == "none", "design"])
-    base = [label for label in (design_label(*d) for d in all_designs()) if label in base_present]
+        raise ValueError("No design has been tested yet: there is nothing to select from")
 
     models = list(dict.fromkeys(rates["llm"]))
-    # Three blocks per model: the untested reference, the usable separators, and the
-    # inverted ones. Each keeps q order within itself.
+    # Two blocks per model: the usable separators and the inverted ones, each in q
+    # order within itself.
     inverted = {model: set(tests.loc[(tests["llm"] == model) & tests["significant"] & (tests["diff"] < 0), "design"])
                 for model in models}
     blocks = {}
     for model in models:
         hits = separating_designs(tests, model)
-        blocks[model] = (base, [d for d in hits if d not in inverted[model]], [d for d in hits if d in inverted[model]])
+        blocks[model] = ([d for d in hits if d not in inverted[model]], [d for d in hits if d in inverted[model]])
         if not hits:
-            print(f"{model}: no design separates the samples at q < {alpha}; only the base cases are plotted.")
+            print(f"{model}: no design separates the samples at q < {alpha}; its panel is empty.")
     selected = {model: [label for block in blocks[model] for label in block] for model in models}
     widest = max(len(labels) for labels in selected.values())
+    if not widest:
+        raise ValueError(f"No design separates the samples at q < {alpha} for any model: nothing to plot")
 
     fig, axes = plt.subplots(
         len(models),
@@ -1143,7 +1292,7 @@ def adoption_rates_fisher(
     for ax, model in zip(axes[:, 0], models):
         one = tests[tests["llm"] == model]
         labels = selected[model]
-        reference, usable, wrong_way = blocks[model]
+        usable, wrong_way = blocks[model]
         _draw_rates(
             ax,
             rates[(rates["llm"] == model) & rates["design"].isin(labels)],
@@ -1151,12 +1300,8 @@ def adoption_rates_fisher(
             f"{model}  ({len(usable) + len(wrong_way)}/{len(one)} designs separate the samples at q < {alpha})",
             flags={label: "†" for label in wrong_way},
         )
-        # The base cases are a block, not a series: a rule between them and the
-        # separators keeps the reference from being read as the first result.
-        if reference and len(labels) > len(reference):
-            ax.axvline(len(reference) - 0.5, color=HAIRLINE, linewidth=1.0, zorder=1)
-        # The second rule is red because what it fences off is a warning: everything
-        # to its right is significant and pointing the wrong way.
+        # The rule is red because what it fences off is a warning: everything to its
+        # right is significant and pointing the wrong way.
         if wrong_way and len(wrong_way) < len(labels):
             ax.axvline(len(labels) - len(wrong_way) - 0.5, color=WARNING, linewidth=1.4, zorder=1)
 
@@ -1179,11 +1324,20 @@ def adoption_rates_fisher(
 # when they are: A0, A1 and A2 partition the grid, so their effects sum to zero
 # once weighted by cell count, and a table with only A1 and A2 in it hides which
 # way the baseline itself leans.
-MODULE_AXES = (
-    ("A", 1, "self", ("none", "facts", "narrative")),
-    ("B", 3, "nbr", ("none", "facts", "narrative")),
-    ("C", 5, "endorse", ("no", "yes")),
-    ("D", 7, "instr", ("plain", "MOA", "DT")),
+# The short name each axis goes by in the table's column heads, in `AXES` order.
+# The positions are not repeated here: they come from `AXIS_POSITIONS`, so a new
+# axis cannot end up read out of the wrong digit.
+MODULE_SHORT = {"A": "self", "B": "nbr", "L": "leader", "D": "instr"}
+MODULE_LEVEL_NAMES = {
+    "A": ("none", "facts", "narrative"),
+    "B": ("none", "facts", "narrative"),
+    "L": ("no", "yes"),
+    "D": ("plain", "MOA", "DT"),
+}
+
+MODULE_AXES = tuple(
+    (letter, AXIS_POSITIONS[letter], MODULE_SHORT[letter], MODULE_LEVEL_NAMES[letter])
+    for letter, _keyword, _levels in AXES
 )
 
 MODULES = tuple(
@@ -1198,24 +1352,30 @@ def module_effects(
     llm: LLMs | None = None,
     alpha: float = FDR_ALPHA,
 ) -> pd.DataFrame:
-    """Each module's own effect on take-up, per sample, against the grid average.
+    """Each module's own effect on transmission, per sample, against the grid average.
 
     A *module* is one level of one axis -- `A2` is the narrative self-profile,
-    `C0` is no endorsement line -- and its effect is the take-up rate over every
-    design carrying it, minus the take-up rate over the whole grid, in percentage
-    points. Signed, so the number carries the direction.
+    `L1` is the leader line -- and its effect is the transmission rate over every
+    design carrying it, minus the transmission rate over the whole grid, in
+    percentage points. Signed, so the number carries the direction.
+
+    This is where the leader axis is read. `design_tests` asks whether a design
+    splits the two arms, which is the qP / qN question; `L1` against `L0` here is
+    the other question BCDJ's design raises -- whether being one of the households
+    the MFI briefed and asked to spread the word moves how much gets passed on --
+    and it is answered per arm, so a leader effect that only exists among adopters
+    shows up as one.
 
     Read as a marginal, not as a main effect in a fitted model. The grid is
     balanced, so averaging over the designs that carry a module averages the
     other three axes out of it evenly; what it does not do is say anything about
-    interactions, and the pilot has already found one that matters (`A1B1C0D1`
-    is the run's only inverted design). A module whose effect is near zero here
-    can still be doing something in combination.
+    interactions. A module whose effect is near zero here can still be doing
+    something in combination.
 
-    **The base cases are not in it.** `A0B0C0D*` renders identically for both
-    samples, so it has only a `none` arm and no adopter/non-adopter row to
-    contribute -- which is what makes those three the controls for the other 51
-    rather than part of the average.
+    One caveat specific to `L`: the leader level picks the ego household as well as
+    the line, and the two leader households differ from the two non-leader ones in
+    savings group and bank account (see `SAMPLE_HH_*`). The `L1` effect is the joint
+    effect of the line and that difference, and nothing here can separate them.
 
     The test is the module against its complement rather than against the grand
     mean, because a subset cannot be tested against a mean that contains it.
@@ -1229,8 +1389,8 @@ def module_effects(
     and Benjamini-Hochberg across all of a model's module-by-sample tests, which
     is one family of the same question asked 22 times.
 
-    Columns: `module`, `label`, `sample`, `n` and `adopted` (over *answered*
-    repetitions, as `adoption_rates` counts them), the three rates, `effect` in
+    Columns: `module`, `label`, `sample`, `n` and `told` (over *answered*
+    repetitions, as `transmission_rates` counts them), the three rates, `effect` in
     percentage points, `p`, `q` and `significant`.
     """
     if results is None:
@@ -1238,12 +1398,12 @@ def module_effects(
 
     frame = results[results["sample"].isin(("adopter", "non_adopter"))].copy()
     frame = frame[frame["decision"] != PARSING_ERROR]
-    frame["joined"] = (frame["decision"] == YES_TOKEN).astype(int)
+    frame["told"] = (frame["decision"] == YES_TOKEN).astype(int)
 
     rows = []
     for model, per_model in frame.groupby("llm", sort=False):
         for sample, arm in per_model.groupby("sample", sort=False):
-            grand = arm["joined"].mean()
+            grand = arm["told"].mean()
             for module, label, _axis, position, digit in MODULES:
                 carries = arm["design"].str[position] == digit
                 has, has_not = arm[carries], arm[~carries]
@@ -1251,8 +1411,8 @@ def module_effects(
                     continue
                 _, p = fisher_exact(
                     [
-                        [int(has["joined"].sum()), int((1 - has["joined"]).sum())],
-                        [int(has_not["joined"].sum()), int((1 - has_not["joined"]).sum())],
+                        [int(has["told"].sum()), int((1 - has["told"]).sum())],
+                        [int(has_not["told"].sum()), int((1 - has_not["told"]).sum())],
                     ],
                     alternative="two-sided",
                 )
@@ -1263,11 +1423,11 @@ def module_effects(
                         "label": label,
                         "sample": sample,
                         "n": int(len(has)),
-                        "adopted": int(has["joined"].sum()),
-                        "rate": float(has["joined"].mean()),
-                        "rate_other": float(has_not["joined"].mean()),
+                        "told": int(has["told"].sum()),
+                        "rate": float(has["told"].mean()),
+                        "rate_other": float(has_not["told"].mean()),
                         "rate_grand": float(grand),
-                        "effect": 100.0 * (has["joined"].mean() - grand),
+                        "effect": 100.0 * (has["told"].mean() - grand),
                         "p": float(p),
                     }
                 )
@@ -1314,23 +1474,28 @@ def module_report(
     if effects is None:
         effects = module_effects(alpha=alpha)
     if effects.empty:
-        print("no two-arm repetitions logged, so no module has an effect to report")
+        print("no repetitions logged, so no module has an effect to report")
         return effects
 
     for model, per_model in effects.groupby("llm", sort=False):
         hits = int(per_model["significant"].sum())
         print(f"{model}: {hits}/{len(per_model)} module-by-sample effects significant at q < {alpha}")
-        print("  take-up, percentage points against the average over all 51 two-arm designs")
+        print("  transmission, percentage points against the average over all 54 designs")
         table = module_effects_table(per_model, alpha=alpha).drop(columns="llm")
         print("\n".join("  " + line for line in table.to_string(index=False).splitlines()))
         grand = per_model.groupby("sample")["rate_grand"].first()
-        print("  grand take-up: " + ", ".join(f"{s} {r:.3f}" for s, r in grand.items()))
+        print("  grand transmission rate: " + ", ".join(f"{s} {r:.3f}" for s, r in grand.items()))
     return effects
 
 
 # --------------------------------------------------------------------------
 # The DT designs: the matrices behind the decisions
 # --------------------------------------------------------------------------
+
+# The state whose elicited probability is the continuous outcome `dt_tests` uses.
+# Over two states the other one is 1 minus this, so there is one number to test and
+# naming it here keeps the frame's column and the test from drifting apart.
+DT_TEST_STATE = "they_join"
 
 DT_FRAME_COLUMNS = (
     ["llm", "design", "sample", "repetition", "decision", "parsed"]
@@ -1352,7 +1517,7 @@ def dt_frame(results: pd.DataFrame | None = None, llm: LLMs | None = None) -> pd
     shape, reading the matrix out of it is a `json.loads`.
 
     Every D2 repetition gets a row, parsed or not. `parsed` says which; `p_sum`
-    and `p_valid` say whether the three probabilities are a distribution -- the
+    and `p_valid` say whether the two probabilities are a distribution -- the
     one part of the schema strict mode could not enforce; and `coherent` says
     whether the decision the model stated is the one its own matrix implies,
     which is the question the mode exists to make askable. A tie in expected
@@ -1360,7 +1525,7 @@ def dt_frame(results: pd.DataFrame | None = None, llm: LLMs | None = None) -> pd
     """
     if results is None:
         results = load_results(llm)
-    dt_rows = results[results["design"].astype(str).str.endswith("D2")]
+    dt_rows = results[results["design"].map(lambda label: label_digit(label, "D") == DT_DIGIT)]
 
     rows = []
     for record in dt_rows.to_dict("records"):
@@ -1406,17 +1571,17 @@ def dt_frame(results: pd.DataFrame | None = None, llm: LLMs | None = None) -> pd
 
 
 def dt_tests(dt: pd.DataFrame | None = None, alpha: float = FDR_ALPHA) -> pd.DataFrame:
-    """Mann-Whitney per (model, DT design): is P(beneficial) higher for the adopter sample?
+    """Mann-Whitney per (model, DT design): is P(they join) higher for the adopter ego?
 
     The companion to `design_tests`, on a different outcome. The decision is one
     bit per repetition, and Fisher's exact on twenty of them needs a near-perfect
-    split to survive correction -- a 7-vs-3 difference in adoption rate reaches
-    p = 0.18 and no further. The elicited probability of the beneficial state is
+    split to survive correction -- a 7-vs-3 difference in transmission rate reaches
+    p = 0.18 and no further. The elicited probability that the neighbour joins is
     continuous, so the same twenty repetitions carry far more of the difference
     between the two samples, if there is one. A design can separate the samples
     here and not there, and that is informative rather than contradictory: it
-    says the households' circumstances moved the model's beliefs without moving
-    its answer across the threshold.
+    says the ego's own status moved what the model expects of the neighbour without
+    moving its answer across the threshold.
 
     Rank-based rather than a t-test: these are bounded, often clustered
     probabilities with no reason to be normal. BH-corrected within model, as in
@@ -1429,7 +1594,7 @@ def dt_tests(dt: pd.DataFrame | None = None, alpha: float = FDR_ALPHA) -> pd.Dat
     usable = dt[dt["parsed"] & dt["sample"].isin(("adopter", "non_adopter"))]
     for (model, design), group in usable.groupby(["llm", "design"], sort=False):
         arms = {
-            sample: group.loc[group["sample"] == sample, "p_beneficial"].to_numpy(dtype=float)
+            sample: group.loc[group["sample"] == sample, f"p_{DT_TEST_STATE}"].to_numpy(dtype=float)
             for sample in ("adopter", "non_adopter")
         }
         if min(len(arm) for arm in arms.values()) == 0:
@@ -1473,7 +1638,7 @@ def dt_report(
     tests: pd.DataFrame | None = None,
     alpha: float = FDR_ALPHA,
 ) -> pd.DataFrame:
-    """Print what the DT designs produced, and return the P(beneficial) tests.
+    """Print what the DT designs produced, and return the P(they join) tests.
 
     Two blocks per model. The first is whether the mode worked at all: how many
     responses carried a matrix, how many of those carried a distribution, and how
@@ -1483,8 +1648,7 @@ def dt_report(
     is worth knowing before any of the numbers below it are read.
 
     The second is which designs separate the samples on the elicited probability
-    of the beneficial state, best first, alongside the adoption rates the same
-    designs produced.
+    that the neighbour joins, best first.
     """
     if dt is None:
         dt = dt_frame()
@@ -1511,8 +1675,8 @@ def dt_report(
             if arm.empty:
                 continue
             print(
-                f"  {SAMPLE_LABELS[sample]:<18} P(beneficial) {arm['p_beneficial'].mean():.3f}"
-                f" +- {arm['p_beneficial'].std(ddof=1) if len(arm) > 1 else 0.0:.3f}"
+                f"  {SAMPLE_LABELS[sample]:<22} P({DT_TEST_STATE}) {arm[f'p_{DT_TEST_STATE}'].mean():.3f}"
+                f" +- {arm[f'p_{DT_TEST_STATE}'].std(ddof=1) if len(arm) > 1 else 0.0:.3f}"
                 f"   EU margin {arm['eu_margin'].mean():+.2f}   n = {len(arm)}"
             )
 
@@ -1521,7 +1685,7 @@ def dt_report(
             print("  no two-arm DT design has parsed on both sides yet: nothing to test.")
             continue
         hits = one[one["significant"]]
-        print(f"\n  {len(hits)}/{len(one)} DT design(s) separate the samples on P(beneficial) at q < {alpha}")
+        print(f"\n  {len(hits)}/{len(one)} DT design(s) separate the samples on P({DT_TEST_STATE}) at q < {alpha}")
         print(f"  {'design':<10}{'adopter':>9}{'non-adopt':>11}{'diff':>8}{'p':>10}{'q':>10}")
         for _, row in (hits if not hits.empty else one).head(10).iterrows():
             print(
@@ -1542,15 +1706,16 @@ DT_FIGURE = FIGURE_DIR / "dt_rationality.png"
 # counting ties with one side would put unfalsifiable rows into that side's ratio.
 EU_DIRECTIONS = (("y", "EU(Y) > EU(N)"), ("n", "EU(Y) < EU(N)"), ("tie", "EU(Y) = EU(N)"))
 
-# The decision axis borrows the sample palette: joining is the warm colour on both
-# figures, which is what keeps them readable side by side.
+# The decision axis borrows the sample palette: telling the neighbour is the warm
+# colour on both figures, which is what keeps them readable side by side.
 DECISION_COLOURS = {YES_TOKEN: SAMPLE_COLOURS["adopter"], NO_TOKEN: SAMPLE_COLOURS["non_adopter"]}
 
 def _percent(share: float) -> str:
     """A share as whole percent, except that a nonzero one never prints as 0%.
 
-    The tie group is two responses out of seven hundred. Rounding that to "0%"
-    beside "n = 2" reads as a rendering fault rather than as a rare case.
+    The tie group -- a matrix whose two actions came out at equal expected utility --
+    is a handful of responses out of hundreds. Rounding that to "0%" beside "n = 2"
+    reads as a rendering fault rather than as a rare case.
     """
     if math.isnan(share):
         return "--"
@@ -1569,10 +1734,10 @@ def eu_decision_split(dt: pd.DataFrame | None = None, llm: LLMs | None = None) -
 
     The two questions the first panel asks, in one table. `share` is over the
     model's parsed responses -- how often the elicited matrix came out in favour of
-    joining at all -- and `share_yes` is *within* the direction: of the responses
-    whose own matrix favoured joining, how many went on to answer (Y). The second
-    is the interesting one. A model whose matrices favour joining 93% of the time
-    but who answers (Y) in only 72% of those is not being swayed by its own
+    telling the neighbour at all -- and `share_yes` is *within* the direction: of the
+    responses whose own matrix favoured telling, how many went on to answer (Y). The
+    second is the interesting one. A model whose matrices favour telling 93% of the
+    time but which answers (Y) in only 72% of those is not being swayed by its own
     analysis, and no amount of prompt design on top of it will fix that.
 
     A direction no response took is dropped rather than plotted at zero, so a model
@@ -1717,8 +1882,8 @@ def plot_dt_rationality(
     """Whether the DT designs' decisions follow the matrices they came with.
 
     Two panels per model, on the same question from two sides. The left one asks it
-    conditionally -- given a matrix that favoured joining, how often did the answer
-    follow, and likewise for one that favoured staying out -- which is where a model
+    conditionally -- given a matrix that favoured telling, how often did the answer
+    follow, and likewise for one that favoured staying quiet -- which is where a model
     that ignores its analysis in one direction only shows up. The right one asks it
     once, over everything: what share of the answers were the argmax of the
     response's own expected utilities.
@@ -1761,13 +1926,16 @@ def plot_dt_rationality(
 # CLI
 # --------------------------------------------------------------------------
 
-DESCRIPTION = "The adoption-rate pilot: one prompt-design grid per model, its rates, and which designs separate the samples."
+DESCRIPTION = (
+    "The transmission-rate pilot: one prompt-design grid per model, the rate at which each "
+    "design's ego tells its neighbour, and which designs reproduce BCDJ's qP > qN asymmetry."
+)
 
 # The short name each model answers to on the command line, next to the value and
 # the enum name -- `--models gpt` is what a run is actually typed as.
 MODEL_ALIASES = {"gpt": LLMs.GPT_5_4_NANO, "haiku": LLMs.HAIKU_4_5, "grok": LLMs.GROK_4_2}
 
-DEFAULT_FIGURE = FIGURE_DIR / "adoption_rates.png"
+DEFAULT_FIGURE = FIGURE_DIR / "transmission_rates.png"
 
 # Where each `plot --kind` writes, unless --outfile says otherwise.
 PLOT_KINDS = {"rates": DEFAULT_FIGURE, "fisher": FISHER_FIGURE, "dt": DT_FIGURE}
@@ -1788,7 +1956,7 @@ def resolve_designs(labels: list[str] | None) -> list[tuple[str, str, str, str]]
     """Design labels back into the tuples `run_pilot` takes, in grid order.
 
     The label is the only handle a design has outside the code -- it is what the CSV
-    filenames and the plot's ticks are written in -- so `--designs A1B0C1D0` is how
+    filenames and the plot's ticks are written in -- so `--designs A1B0L1D2` is how
     one design out of the 54 is asked for by name.
     """
     if not labels:
@@ -1797,7 +1965,7 @@ def resolve_designs(labels: list[str] | None) -> list[tuple[str, str, str, str]]
     wanted = [label.strip().upper() for label in labels]
     unknown = [label for label in wanted if label not in by_label]
     if unknown:
-        raise ValueError(f"no such design(s): {', '.join(unknown)}. Labels look like A0B0C0D0 (see design_label)")
+        raise ValueError(f"no such design(s): {', '.join(unknown)}. Labels look like A0B0L0D0 (see design_label)")
     # Grid order, not the order they were typed, so a partial run reads like the whole.
     return [design for label, design in by_label.items() if label in set(wanted)]
 
@@ -1805,22 +1973,24 @@ def resolve_designs(labels: list[str] | None) -> list[tuple[str, str, str, str]]
 def dry_run(designs: list[tuple[str, str, str, str]], print_prompts: bool = False) -> int:
     """Render every design and call nothing: what `--live` would send, for free.
 
-    The failure this catches is the one worth catching before paying for 105 calls: a
+    The failure this catches is the one worth catching before paying for 108 calls: a
     sample household with a missing field, or a profiles file that was never built,
     fails here at design one rather than three designs into the grid. Both arms are
-    rendered, because a field missing on the non-adopter household would otherwise
-    only surface halfway through the live run. Rendering is model-independent, so
-    this is the same check whichever models were asked for.
+    rendered, because a field missing on one of the four egos would otherwise only
+    surface part-way through the live run -- and the leader axis means all four are
+    reached, not just two. Rendering is model-independent, so this is the same check
+    whichever models were asked for.
     """
     rendered = failed = 0
     for design in designs:
         label = design_label(*design)
-        for sample, (ego_hhid, informer_hhid) in design_samples(*design[:3]).items():
+        leader = design[AXIS_KEYWORDS.index("leader")]
+        for sample, (ego_hhid, informee_hhid) in design_samples(leader).items():
             try:
                 prompt = get_prompt(
                     *design,
-                    hhid=ego_hhid if design[0] else None,
-                    informer_hhid=informer_hhid if (design[1] or design[2]) else None,
+                    hhid=ego_hhid,
+                    informee_hhid=informee_hhid,
                 )
             except Exception as exc:  # noqa: BLE001 -- report every broken design, not the first
                 print(f"  {label} {sample:<12} FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -1867,7 +2037,7 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=None,
         metavar="LABEL",
-        help="design labels like A1B0C1D0 (default: the full 54-design factorial)",
+        help="design labels like A1B0L1D2 (default: the full 54-design factorial)",
     )
     r.add_argument(
         "--reps",
@@ -1890,8 +2060,8 @@ def main(argv: list[str] | None = None) -> int:
         "--kind",
         choices=tuple(PLOT_KINDS),
         default="rates",
-        help="rates: every design that has been run. fisher: the base cases and only the designs that "
-        "separate the samples. dt: whether the DT decisions follow their own matrices. (default: rates)",
+        help="rates: every design that has been run. fisher: only the designs that separate the "
+        "samples. dt: whether the DT decisions follow their own matrices. (default: rates)",
     )
     pl.add_argument("--alpha", type=float, default=FDR_ALPHA, help=f"--kind fisher: the FDR level (default: {FDR_ALPHA})")
     pl.add_argument(
@@ -1907,14 +2077,14 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--alpha", type=float, default=FDR_ALPHA, help=f"the FDR level (default: {FDR_ALPHA})")
     rp.add_argument("--csv", type=Path, default=None, help="also write the full test table here")
 
-    md = sub.add_parser("modules", help="each module's own effect on take-up, per sample, vs the grid average")
+    md = sub.add_parser("modules", help="each module's own effect on transmission, per sample, vs the grid average")
     md.add_argument("--models", nargs="+", default=None, metavar="MODEL", help="default: every model in the logs")
     md.add_argument("--output-dir", type=Path, default=OUTPUT_DIR, help="where to read the CSVs from")
     md.add_argument("--alpha", type=float, default=FDR_ALPHA, help=f"the FDR level (default: {FDR_ALPHA})")
     md.add_argument("--csv", type=Path, default=None, help="write the module x sample table here")
     md.add_argument("--detail-csv", type=Path, default=None, help="also write the rates, counts and p-values behind it")
 
-    dt = sub.add_parser("dt", help="the DT designs: parse and coherence rates, and P(beneficial) per sample")
+    dt = sub.add_parser("dt", help="the DT designs: parse and coherence rates, and P(they join) per sample")
     dt.add_argument("--models", nargs="+", default=None, metavar="MODEL", help="default: every model in the logs")
     dt.add_argument("--output-dir", type=Path, default=OUTPUT_DIR, help="where to read the CSVs from")
     dt.add_argument("--alpha", type=float, default=FDR_ALPHA, help=f"the FDR level (default: {FDR_ALPHA})")
@@ -1933,10 +2103,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.command == "run":
         llms = models if models is not None else list(LLMs)
-        # Only the base case needs no household data, so only it can run from anywhere.
-        needs_data = any(profile or informer or endorsement for profile, informer, endorsement, _ in designs)
+        # Every design needs the household data now: the ego's own adoption status is
+        # in every prompt, so there is no design that renders without a table to read
+        # it from.
         missing = [path for path in (FEATURES_PATH, PROFILES_PATH) if not path.is_file()]
-        if needs_data and missing:
+        if missing:
             print(
                 f"error: {', '.join(str(path) for path in missing)} not found. These paths are relative: "
                 "run this from the repository root.",
@@ -1994,15 +2165,15 @@ def main(argv: list[str] | None = None) -> int:
             if a.kind == "dt":
                 plot_dt_rationality(dt_frame(results), outfile=outfile)
             elif a.kind == "fisher":
-                adoption_rates_fisher(rates=adoption_rates(results), alpha=a.alpha, outfile=outfile)
+                transmission_rates_fisher(rates=transmission_rates(results), alpha=a.alpha, outfile=outfile)
             else:
-                plot_adoption_rates(rates=adoption_rates(results), outfile=outfile)
+                plot_transmission_rates(rates=transmission_rates(results), outfile=outfile)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0
 
-    rates = adoption_rates(results)
+    rates = transmission_rates(results)
 
     tests = design_tests(rates=rates, alpha=a.alpha)
     significance_report(tests, alpha=a.alpha)
