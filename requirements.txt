@@ -2,6 +2,18 @@ pandas>=2.0
 numpy>=1.24
 matplotlib>=3.7
 networkx>=3.0
+openai>=1.50
+
+# The adoption-rate pilot (src/pilot/adoption_rate_pilot.py):
+# Fisher's exact test on 2x2 adopter/non-adopter take-up counts, and the
+# multiple-comparison correction over the prompt-design grid. profiler.py
+# hand-rolls Welch's t to avoid this dependency for one number, which was the
+# right call there; an exact test per design cell is not.
+scipy>=1.10
+
+# The pilot's progress bar. A full grid is 70 sequential API calls per model, and
+# a print per design says how far in but not how long is left.
+tqdm>=4.66
 
 # tests
 pytest>=8.0

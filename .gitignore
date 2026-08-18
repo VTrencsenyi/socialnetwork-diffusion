@@ -26,6 +26,20 @@ output/
 # the write-up links them. Add `figures/` here if you'd rather they be rebuilt.
 
 # ---------------------------------------------------------------------------
+# LaTeX build artefacts
+# ---------------------------------------------------------------------------
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.fdb_latexmk
+report/*.fls
+report/*.log
+report/*.out
+report/*.pdf
+report/*.synctex.gz
+report/*.toc
+
+# ---------------------------------------------------------------------------
 # Python
 # ---------------------------------------------------------------------------
 __pycache__/
@@ -68,3 +82,10 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+.claude/
+
+tests/
+
+figures/misc/
+figures/pilot_v0/

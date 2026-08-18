@@ -31,7 +31,8 @@ except ImportError:  # running as a script, not a package
 
 BASE_CONTEXT = """
 An institution providing microfinance services has started a new programme in villages across Karnataka, India.
-Their services have entered your village, and as the head of the household you have been asked to consider joining the programme.
+You have been informed that their services are now available in your village too.
+You are the head of a household in this village, and as the head you represent your household and its interests.
 """
 
 DEMOGRAPHIC_ENHANCEMENT = """

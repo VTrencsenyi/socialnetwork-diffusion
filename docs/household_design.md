@@ -1,7 +1,7 @@
 # `Household`: design plan for the data component
 
 Status: the reduced feature set of §4 is decided and built —
-`tools.build_household_features()` writes it to `output/hh_features_<village>.csv`. The
+`tools.build_household_features()` writes it to `output/features/hh_features_<village>.csv`. The
 persona rendering, the decision loop and the prompt are still open. Scope: **what data a
 household agent carries and why** — not yet how it decides, talks, or is prompted.
 
@@ -141,7 +141,7 @@ rather than an omission.
 | `occupation_head` | `individual.occupation` | surveyed households only | Raw free text, deliberately not bucketed — §4.3c. Unlike `subcaste`, kept for narrative variance in generated biographies, not as a clean categorical. |
 | `has_shg`, `has_savings` | `shgparticipate`, `savings` | surveyed households only | Tri-state. Which household members' answers these aggregate is a run parameter — §4.3. |
 
-Rendered by `tools.build_household_features()` to `output/hh_features_<village>.csv`, one
+Rendered by `tools.build_household_features()` to `output/features/hh_features_<village>.csv`, one
 row per household, row *i* = adjacency row *i*. Unknown is empty in the CSV — never `0`,
 never `False` — which is why every integer column is a nullable `Int64` and the two survey
 flags are a nullable `boolean`.
@@ -265,8 +265,9 @@ Two consequences:
 The column is left **raw** regardless, because the alternatives are worse: a prefix or
 edit-distance heuristic would merge `ADI KARNATAKA` with the wrong things sooner or later,
 and it would do so silently. With ≤17 levels per village, eyeballing a curated alias map is
-minutes of work and is auditable — see §7.4. Until that exists, the raw string is honest
-and the inflation is documented.
+minutes of work and is auditable — see §7.4, where that map now exists for the pilot village
+and is applied downstream rather than in this builder, so what ships from here stays the raw
+string and the inflation stays visible.
 
 ### 4.3c `occupation_head`, and why it is *not* the same reversal as `subcaste`
 
@@ -467,7 +468,7 @@ State it as a property of the design, not as something discovered afterwards.
 ## 5. Field layout
 
 Grouped by consumer, so the separation in §1 is visible in the type. This is the schema
-`tools.build_household_features()` writes to `output/hh_features_<village>.csv`:
+`tools.build_household_features()` writes to `output/features/hh_features_<village>.csv`:
 
 ```
 Household
@@ -487,23 +488,112 @@ Household
 `neighbours` and the `state` block are the simulation's, not the table's — the CSV is
 static input, and `row` is the join back to the adjacency matrix.
 
-Four representation decisions that matter more than they look:
+### 5.1 Two profile arms, one grounding, one artefact
 
-- **Relative, not absolute, in the persona.** "2 rooms for 6 people — more crowded than
-  most households here" beats "room_no = 2". A household judges itself against its
-  neighbours, so percentile within the *village* is the honest framing and the absolute
-  count is close to meaningless to an LLM. This implies within-village normalisation, so
-  the constructor needs the village, not just the row.
+The profile is the experimental manipulation, so there are two of them and `profiler.py`
+builds both from the *same* `render_traits()` output, into **one JSON per village**:
+`output/profiles/profiles_<village>.json`, keyed by hhid.
+
+```
+"73001": {
+  "traits":            {...},   # the twelve disclosed fields, labelled
+  "static_profile":    "...",   # the `facts` arm, rule-based, no LLM
+  "prompt":            {"model", "instructions", "input"},
+  "narrative_profile": "...",   # the `story` arm, what the LLM returned
+  "usage":             {...}    # what this household cost, in tokens
+}
+```
+
+`--mode facts` writes the first two keys and stops; `--mode story` writes all five, so a
+story-mode file is a strict superset. Keeping `traits` and `static_profile` beside the
+narrative is the point: the two arms are then *provably* built from the same twelve facts,
+rather than from two files that have to be trusted to agree. `prompt` is the whole request
+as the model receives it, so what the model was told is recoverable from the artefact
+rather than from whichever version of the source produced it.
+
+> **This file supersedes the context `.txt` files.** An earlier iteration also wrote
+> `output/context/<mode>/context_<hhid>.txt`, because that is what `agent.HH_Agent.context`
+> reads. That is withdrawn — a second on-disk copy of the same text is one that can drift.
+> `agent.py` and `game_master.py` still expect context files and have **not** been changed;
+> wiring them to read the JSON is a separate job and is the next thing owed here.
+
+| | `facts` | `story` |
+|---|---|---|
+| what the agent carries | the twelve labelled lines of §5.2 | a ~95–115 word narrative |
+| written by | a pure function of the row | an LLM, once per household, then frozen |
+| cost | none | one call per household, nothing per round |
+| length across the surveyed split | fixed by construction | varies — measured, not constrained |
+
+The `story` arm exists because of Concordia's claim that agents with distinct biographies,
+memories and plans "behave systematically differently from one another" (Vezhnevets et al.).
+What we are testing is whether that survives the biography being *grounded in real survey
+data* rather than authored — which is exactly the constraint Concordia does not operate
+under, and the reason this is a finding rather than a demo.
+
+Two things this arrangement is careful about:
+
+- **The leakage control is written once and covers both arms.** `build_request()` takes a
+  `dict[str, str]`, never a row, so the model is structurally unable to see a column the
+  fact listing does not contain. §1's non-negotiable therefore costs one test, not two.
+- **The neighbour view is rule-based in both arms.** The mode switch applies to a
+  household's own profile and not to what it is told about others. A neighbour profile is
+  attached per edge per round — ~8,400 times in village 24 — and is the *non*-cacheable tail
+  of that prompt, where the profile is the cacheable prefix and is paid for once. It is also
+  the honest information model: you know your neighbour's house, work and community, not
+  their interior life.
+
+**Narrative length varies with `surveyed`, and that is left alone.** A surveyed household
+has four more facts to write from, so its narrative runs longer — measured at roughly 6
+words on a ~110-word budget over 40 households of village 73 (Welch *t* ≈ 3). That is a real
+consequence of knowing more about a household, not an artefact to engineer away, so nothing
+constrains it. `profiler.balance_report()` prints the gap on every live run purely so the
+number is on the record: `surveyed` tracks degree (3.41×) and take-up (+2.4pp) per §3, so
+anything co-varying with it must be quoted with the results rather than found afterwards.
+The `facts` arm is fixed-length by construction and cannot show the effect at all, which is
+part of why it is the headline arm and the story is the ablation.
+
+### 5.2 Representation
+
+Four decisions that matter more than they look:
+
+- **A plain fact listing, not a rendered persona.** What `profiler.render_traits()` hands
+  the model is one labelled survey field per line — twelve of them for every household:
+  `religion, rooms, beds, capita, rooms_per_capita, beds_per_capita, electricity,
+  own_latrine, subcaste, occupation_head, has_shg, has_savings` — with `not known` where
+  the value is missing, and no interpretation on top. The labels do the disambiguating the
+  column names cannot (`has_shg` → "member of a savings self-help group", `has_savings` →
+  "has a bank or savings account", `own_latrine` → owns one vs. shared/none), because that
+  meaning is in the codebook, not in the data. The prose — and any judgement about what
+  two rooms for six people amounts to — is the LLM's to write.
+
+  *This amends an earlier decision here*, which was to pre-digest the dwelling fields into
+  a within-village percentile ("more crowded than most households here") and to state
+  `beds = 0` in words rather than as a figure. Both put our reading of the data into the
+  prompt ahead of the model's, and the crowding percentile in particular made the rendering
+  depend on the whole village rather than the row. Derived features like that are out at
+  this stage; the raw figures go in and the identity `rooms = capita × rooms_per_capita`
+  is simply stated three times, which is the price of not interpreting it for the model.
 - **Do not state degree numerically.** "You have 17 friends" reads to an LLM as an
   instruction to be influential, which manufactures the network effect we are trying to
   measure. Network position should reach the agent only through who actually talks to it.
   Keep `degree` on the object for evaluation.
-- **Three columns, one fact.** `rooms`, `capita` and `rooms_per_capita` are an identity,
-  and so are `beds`, `capita` and `beds_per_capita`. The table carries all of them because
-  the baseline wants BCDJ's covariate matrix intact; the persona must render each fact
-  once, or we pay for it three times per agent per timestep.
-- **`beds = 0` needs words, not a number.** Half the bundle has no cot or bedstead. Left as
-  a bare `0` it reads to an LLM like a broken record rather than the poverty marker it is.
+- **`has_leader` is not a disclosed field, but it is not wasted either.** It never appears
+  as a flag of its own. It is read in exactly one place: when a leader household's
+  `occupation_head` is unknown, the occupation line becomes "works in a role that entails
+  leadership in the village" — which is what BSS's designation means (teachers,
+  shopkeepers, SHG leaders). A leader household that already has an occupation keeps it,
+  and renders identically to a non-leader household. That keeps the seed assignment from
+  reading as a status the agent should act on, while still using the one thing it tells us
+  about the ~46% of leader households the individual survey never reached.
+- **The whole prompt, and what it cost, go in the output.** `biographies_<village>.json`
+  records `prompt: {model, instructions, input}` — the system instructions as well as the
+  facts — so what the model was told is recoverable from the artefact rather than from
+  whichever version of the source produced it. Alongside it, `usage: {input_tokens,
+  output_tokens, total_tokens, cached_input_tokens, reasoning_tokens}` as the API reported
+  it, per household. Per household rather than per village because the persona is the
+  thing we pay for once per agent per timestep, so its token size is the number that
+  scales the whole simulation; `profiler.total_usage()` aggregates when a total is what
+  is wanted.
 
 Also: the persona string is immutable, so build it once per household and cache it. Only
 the dynamic block (who told me what, which trimester) varies per call. That is the main
@@ -554,14 +644,21 @@ Nothing in the ordering changes: 73 and 67 lead on the criteria that still bind.
    correctness check: a sane model must never have them adopt) and reporting both.
 3. **`leader` as "informed".** Inherited from BCDJ, but it means the seed set is
    over-stated by an unknown amount. Assumption to state, not resolve.
-4. **Normalising `subcaste` spellings.** The column ships raw (§4.3b), which inflates the
-   level count by roughly a third and understates homophily. The fix is a per-village alias
-   map — 12–17 values to review by eye, so half an hour of work for both candidate
-   villages, and auditable in a way a string-similarity heuristic is not. Open because it
-   is a judgement call about which names denote the same group, and getting it wrong in
-   either direction is worse than shipping raw: merge two real groups and homophily is
-   overstated, and the map is invisible in the output. If it lands, keep the raw string in
-   a second column so the merge stays reversible.
+4. **Normalising `subcaste` spellings.** ~~The column ships raw (§4.3b)~~ — **settled for the
+   pilot village, still open elsewhere.** The column still ships raw from
+   `build_household_features()`, and `src/subcaste.py` applies a hand-curated per-village
+   alias map on top, writing `output/features/CLEANED_hh_features_<village>.csv` with the raw
+   string kept in a `subcaste_raw` column so the merge stays reversible — this section's own
+   condition. Village 6 is the only village reviewed so far: 28 household-level levels → 21,
+   10 of 44 rows rewritten, measured homophily 2.05× → 2.14×. `alias_map()` raises for an
+   unreviewed village rather than returning an empty map, so nothing else is silently
+   half-cleaned. The map claims orthography only — plurals, honorific suffixes,
+   transliterations, initialisms — and records the merges it deliberately did *not* make, with
+   reasons, in `subcaste.KEPT_APART`. See `docs/experiment_design.md` §7.1 for the numbers and
+   the three limits that follow (only 36% of village 6's edges have a subcaste at both ends).
+   What remains open: the map for every other village, and whether the *headline* arm reads
+   the cleaned table or the raw one — the raw column surviving makes that a testable
+   manipulation rather than a preference (experiment design §9).
 
 ---
 

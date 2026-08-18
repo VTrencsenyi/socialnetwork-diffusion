@@ -4,5 +4,17 @@
     "base_url": null,
     "organization": null,
     "project": null
+  },
+  "claude": {
+    "api_key": "sk-ant-...",
+    "base_url": "https://api.anthropic.com/v1/",
+    "organization": null,
+    "project": null
+  },
+  "grok": {
+    "api_key": "xai-...",
+    "base_url": "https://api.x.ai/v1",
+    "organization": null,
+    "project": null
   }
 }
