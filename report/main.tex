@@ -76,9 +76,9 @@ While we adpopt the rounds $=$ trimester presence count assumption from the pape
     \end{description}
     \item[Response format]:
     \begin{description}
-        \item[Plain]: Vanilla prompt.
-        \item[Model of appropriateness]: The agent answers 1. What kind of situation is this? 2. What kind of person am I? 3. What should someone like me do in a situation like this?
-        \item[Decision-theoretic]: The LLM must provide a structured JSON schema, populating a decision matrix according to the game definitions, providing a justification for each selected value.   
+        \item[0]Plain: Vanilla prompt.
+        \item[1]Model of appropriateness: The agent answers 1. What kind of situation is this? 2. What kind of person am I? 3. What should someone like me do in a situation like this?
+        \item[2]Decision-theoretic: The LLM must provide a structured JSON schema, populating a decision matrix according to the game definitions, providing a justification for each selected value.   
     \end{description}
 \end{description}
 
@@ -89,9 +89,8 @@ Results from the pilot are consistent with an earlier finding in~\citep{Trencsen
   \centering
   \includegraphics[width=0.92\textwidth]{../figures/pilot/adoption_rates_fisher.png}
   \vspace{-0.3em}
-  \caption{Adoption rate by design, adopter vs.\ non-adopter sample
-  household, $n=20$ reps/arm. Grey: base cases. Red line: the three
-  \texttt{A1B1} designs that invert.}
+  \caption{Adoption rate by design, filtered by statistical significance, adopter vs.\ non-adopter sample
+  household, $n=20$ reps/arm. Grey: base cases. Red line: designs that invert.}
   \label{fig:pilot}
 \end{figure}
 
