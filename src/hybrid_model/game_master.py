@@ -739,14 +739,33 @@ def get_prompt(
 # speak the OpenAI Responses API; claude and grok differ only by base_url.
 class LLMs(Enum):
     GPT_5_4_NANO = "gpt-5.4-nano"
+    GPT_5_6_LUNA = "gpt-5.6-luna"
     HAIKU_4_5 = "claude-haiku-4-5-20251001"
     GROK_4_2 = "grok-4.20-0309-non-reasoning"
 
 
 PROVIDERS = {
     LLMs.GPT_5_4_NANO: "openai",
+    LLMs.GPT_5_6_LUNA: "openai",
     LLMs.HAIKU_4_5: "claude",
     LLMs.GROK_4_2: "grok",
+}
+
+# Which models this path has actually been run against, DT's strict schema
+# included. The gate in `get_response` reads this rather than naming one model,
+# so wiring the next one up is an entry here and a run, not an edit to the
+# elicitation. `full_llm_model.game_master` gates its transmission call on the
+# same set.
+WIRED_UP = frozenset({LLMs.GPT_5_4_NANO, LLMs.GPT_5_6_LUNA})
+
+# The reasoning budget, for the models that take one. A reasoning model left at
+# its provider default spends most of a response thinking, and this study asks a
+# household for one token of decision -- `"none"` buys the answer without the
+# thinking, and keeps the response short enough that MAX_OUTPUT_TOKENS stays as
+# far from binding as it was in the pilot. Absent from this map means the
+# parameter is not sent at all, which is what every model here did before.
+REASONING_EFFORT = {
+    LLMs.GPT_5_6_LUNA: "none",
 }
 
 # What the model must answer with -- the tokens the pilot's instruction asks for
@@ -1014,16 +1033,18 @@ def get_response(
         The call itself failed -- `llm.one_call` has already retried the
         transient cases.
     """
-    if llm is not LLMs.GPT_5_4_NANO:
+    if llm not in WIRED_UP:
         raise NotImplementedError(
-            f"{llm.value} is not wired up yet -- only {LLMs.GPT_5_4_NANO.value} answers so far. "
-            "It has to be tested against this path, DT's strict schema included, before a paid run "
-            "is allowed to depend on it."
+            f"{llm.value} is not wired up yet -- only {', '.join(sorted(m.value for m in WIRED_UP))} "
+            "answer so far. A model has to be tested against this path, DT's strict schema included, "
+            "before a paid run is allowed to depend on it."
         )
     if max_parse_attempts < 1:
         raise ValueError(f"max_parse_attempts must be >= 1, got {max_parse_attempts}")
 
     request: dict[str, object] = {"model": llm.value, "input": prompt}
+    if llm in REASONING_EFFORT:
+        request["reasoning"] = {"effort": REASONING_EFFORT[llm]}
     if instruction == "DT":
         request["text"] = DT_FORMAT
 

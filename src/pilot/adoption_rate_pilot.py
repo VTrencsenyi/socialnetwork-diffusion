@@ -442,7 +442,7 @@ def get_prompt(
     # Filter out empty strings and join the parts with two newlines
     return "\n\n".join(part.strip() for part in prompt_parts if part.strip())
 
-OUTPUT_DIR = Path("output/pilot")
+OUTPUT_DIR = Path("output/pilot/adoption")
 
 CSV_COLUMNS = (
     "repetition",
@@ -690,7 +690,7 @@ def run_pilot(
 # Reading the logs back, and the adoption-rate plot
 # --------------------------------------------------------------------------
 
-FIGURE_DIR = Path("figures/pilot")
+FIGURE_DIR = Path("figures/pilot/adoption")
 
 # plots.py's light surface and categorical slots, so a pilot figure sits next to
 # the network ones without a second palette.
@@ -848,7 +848,7 @@ def plot_adoption_rates(
 ) -> plt.Figure:
     """The adoption rate of every design, with standard-error bars, one row per model.
 
-    Reads whatever is in `output/pilot` unless a rate table is passed in -- so a
+    Reads whatever is in `output/pilot/adoption` unless a rate table is passed in -- so a
     half-finished run plots the designs it has. Designs keep `all_designs()`'s
     order rather than alphabetical, which puts the base case first and steps
     through the axes in the order the labels number them.

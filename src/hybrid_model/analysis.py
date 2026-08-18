@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -206,43 +207,177 @@ def bcdj_baseline(
 # --------------------------------------------------------------------------
 # Shared drawing bits
 # --------------------------------------------------------------------------
+#
+# The grammar here is `src/full_llm_model/analysis.py`'s, and the pilots' before
+# it, kept rather than re-invented so the three sets of figures read as one
+# report: a bar is a mean over replicates, its whisker is +/-1 SE of that mean,
+# the value is printed above it, the key sits above the axes where it cannot
+# land on a bar, and the caption is wrapped to the figure. The rate axis stays
+# 0-100% instead of zooming to whatever this run happened to do -- a design's
+# panel is meant to be readable next to the full-LLM one, and a rescaled axis
+# would make an over-eager model look moderate.
+
+# The two subpopulations get the pilots' two-arm slots, since that is what they
+# are here: one bar per group, side by side, on every column.
+LEADER, NON_LEADER = PARTICIPANT, INFO
+WARNING = "#e34948"  # kept for the one thing that is a warning, not a category
+
+# Data units of label space kept clear of bars on the right, so a reference line
+# can be named where it is rather than in a legend, and the name never has to be
+# read against a bar. `bbox_inches="tight"` absorbs whatever the text overruns.
+MARGIN = 1.9
 
 
-def _style_axis(ax, ylabel: str) -> None:
+def _style_axis(ax, ylabel: str, ymax: float = 1.0) -> None:
     ax.set_facecolor(SURFACE)
-    ax.set_ylabel(ylabel, fontsize=10, color=INK_2)
-    ax.set_ylim(0.0, 1.05)
-    ax.tick_params(axis="y", labelsize=9, colors=INK_2)
-    ax.grid(axis="y", color=HAIRLINE, linewidth=0.6, zorder=0)
+    ax.set_ylabel(ylabel, fontsize=9.5, color=INK_2, labelpad=8)
+    ax.set_ylim(0.0, ymax + 0.06)  # headroom so a bar near 100% keeps its label and whisker
+    ticks = np.arange(0.0, ymax + 1e-9, 0.2)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{tick:.0%}" for tick in ticks])
+    ax.tick_params(axis="y", labelsize=9, colors=INK_2, length=0)
+    ax.grid(axis="y", color=HAIRLINE, linewidth=0.7, zorder=0)
     ax.set_axisbelow(True)
-    for side in ("top", "right"):
+    for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(HAIRLINE)
+    ax.spines["bottom"].set_color(HAIRLINE)
 
 
-def _reference_band(ax, x0: float, x1: float, mean: float, std: float, color: str, label: str) -> None:
-    ax.fill_between([x0, x1], mean - std, mean + std, color=color, alpha=0.12, zorder=1, linewidth=0)
-    ax.plot([x0, x1], [mean, mean], color=color, linewidth=1.6, linestyle="--", zorder=2, label=label)
+def _footnote(fig: plt.Figure, text: str, width: int = 118) -> float:
+    """Wrap a caption to the figure rather than letting it stretch the canvas.
 
-
-def _dot_strip(ax, x: float, values: pd.Series, color: str, width: float = 0.16) -> None:
-    """Every replicate as its own dot, jittered, plus a bar at the mean.
-
-    Individual dots rather than a formula-derived error bar: a design run at
-    1-2 replicates should look sparse, not confidently narrow. `np.std` on a
-    single value is 0, which would otherwise draw a whisker with nothing
-    behind it.
+    `bbox_inches="tight"` grows the saved image to whatever the widest artist
+    needs, so an unwrapped one-line footnote silently doubles the figure width.
+    Returns the bottom margin `tight_layout` should leave for it.
     """
-    values = values.to_numpy(dtype=float)
-    mean = values.mean()
-    ax.bar(x, mean, width=width * 2.2, color=color, alpha=0.30, edgecolor=color, linewidth=1.0, zorder=2)
-    if len(values) > 1:
-        rng = np.random.default_rng(abs(hash(("jitter", x))) % (2**32))
-        jitter = rng.uniform(-width * 0.5, width * 0.5, size=len(values))
-    else:
-        jitter = np.zeros(1)
-    ax.scatter(x + jitter, values, s=22, color=color, edgecolor=SURFACE, linewidth=0.6, zorder=3)
+    lines = textwrap.wrap(text, width=width)
+    fig.text(0.005, 0.005, "\n".join(lines), fontsize=7.5, color=MUTED, va="bottom")
+    return 0.03 + 0.022 * (len(lines) - 1)
+
+
+def _save(fig: plt.Figure, outfile: Path | None, dpi: int = 200) -> None:
+    if outfile is None:
+        return
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outfile, dpi=dpi, facecolor=SURFACE, bbox_inches="tight")
+    print(f"wrote {outfile}")
+
+
+def mean_se(values) -> tuple[float, float]:
+    """Mean and standard error of the mean over replicates.
+
+    The SE is `std(ddof=1) / sqrt(S)`: how precisely S replicates pin down
+    *this design's* mean, and nothing more. It is not a claim about village 6,
+    which happened once. A design at one replicate has no SE at all and gets no
+    whisker rather than a whisker of zero -- a single draw should not look like a
+    converged one, which is the same reason the jittered dot strip that used to
+    stand here was worth losing: it spent five marks per design on scatter the
+    whisker states in one.
+    """
+    values = pd.Series(values).to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return float("nan"), float("nan")
+    if len(values) < 2:
+        return float(values[0]), float("nan")
+    return float(values.mean()), float(values.std(ddof=1) / np.sqrt(len(values)))
+
+
+def mean_sd(values) -> tuple[float, float]:
+    """Mean and standard deviation -- what the BCDJ baseline's spread means.
+
+    Not the SE of its mean: 30 seeds pin that mean down to nothing, and the
+    number the baseline is standing in for is *one* realisation of village 6.
+    The SD is how far a single run of the fitted logit lands from its own centre,
+    which is the quantity a design's single village is being compared against.
+    """
+    values = pd.Series(values).to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return float("nan"), float("nan")
+    return float(values.mean()), float(values.std(ddof=1) if len(values) > 1 else 0.0)
+
+
+def _bar(
+    ax,
+    x: float,
+    mean: float,
+    spread: float,
+    colour: str,
+    width: float,
+    *,
+    alpha: float = 0.9,
+    label: str | None = None,
+    label_colour: str = INK_2,
+    zorder: int = 2,
+) -> float:
+    """One bar: the mean, a whisker if there is a spread to draw, the value above it.
+
+    Returns the top of whatever was drawn, so a caller can stack a second
+    annotation over it without measuring the bar itself.
+    """
+    if not np.isfinite(mean):
+        return float("nan")
+    ax.bar(x, mean, width=width, color=colour, alpha=alpha, linewidth=0, zorder=zorder)
+    top = mean
+    if np.isfinite(spread) and spread > 0:
+        ax.errorbar(x, mean, yerr=spread, fmt="none", ecolor=INK_2, elinewidth=1.1, capsize=3.0,
+                    capthick=1.1, zorder=zorder + 2)
+        top = mean + spread
+    # Relief rule: the value is always legible as text, never by bar height alone.
+    ax.annotate(label if label is not None else f"{mean:.0%}", (x, top), textcoords="offset points",
+                xytext=(0, 4), ha="center", fontsize=8, color=label_colour, zorder=zorder + 3)
+    return top
+
+
+def _asymmetric_bar(ax, x: float, mean: float, lo: float, hi: float, colour: str, width: float) -> float:
+    """`_bar` with an interval that is not symmetric about the mean (a bootstrap CI)."""
+    ax.bar(x, mean, width=width, color=colour, alpha=0.9, linewidth=0, zorder=2)
+    ax.errorbar(x, mean, yerr=[[mean - lo], [hi - mean]], fmt="none", ecolor=INK_2, elinewidth=1.1,
+                capsize=3.0, capthick=1.1, zorder=4)
+    return hi
+
+
+def _column_ticks(
+    ax,
+    labels: list[str],
+    counts: list[str | None],
+    n_reference: int = 0,
+    flagged: set[str] | None = None,
+) -> None:
+    """Design labels in monospace, with the replicate count on a second line.
+
+    The count belongs on the tick and not in the legend the way the full-LLM
+    figures carry it: there the design pairs *are* the legend's series, here they
+    are the x axis. Reference columns keep the proportional face, which is the
+    quiet way of saying they are not one of the runs.
+
+    `flagged` marks a column the way the pilots mark a design that came out the
+    wrong way round -- on its tick, in the warning colour, rather than with a
+    glyph floating over the bars.
+    """
+    flagged = flagged or set()
+    ax.set_xticks(range(len(labels)))
+    ticks = []
+    for lab, count in zip(labels, counts):
+        head = f"{lab} !" if lab in flagged else lab
+        ticks.append(head if count is None else f"{head}\n{count}")
+    ax.set_xticklabels(ticks, fontsize=8, color=INK_2, linespacing=1.5)
+    for i, tick in enumerate(ax.get_xticklabels()):
+        tick.set_family("monospace" if i >= n_reference else "sans-serif")
+        if labels[i] in flagged:
+            tick.set_color(WARNING)
+    ax.tick_params(axis="x", length=0, pad=7)
+
+
+def _legend(ax, handles: list[Line2D]) -> None:
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.005), frameon=False, fontsize=8.5,
+              labelcolor=INK_2, ncols=len(handles) if len(handles) <= 4 else 3, columnspacing=1.8,
+              handletextpad=0.6, borderaxespad=0.0)
+
+
+def _swatch(colour: str, label: str, alpha: float = 0.9) -> Line2D:
+    return Line2D([], [], marker="s", ls="", ms=8, mfc=colour, mec=colour, alpha=alpha, label=label)
 
 
 # --------------------------------------------------------------------------
@@ -256,46 +391,60 @@ def plot_adoption_by_design(
     village: int = VILLAGE,
     root: Path | str | None = None,
     outfile: Path | None = None,
+    dpi: int = 200,
 ) -> plt.Figure:
     """Population adoption rate per design against ground truth and the BCDJ baseline."""
     rates = rates if rates is not None else load_design_rates(village=village, root=root)
     baseline = baseline if baseline is not None else bcdj_baseline(village=village, root=root)
     gt = ground_truth_rates(village, root=root)
+    truth = gt["all"]
 
     designs = sorted(rates["design"].unique())
-    fig, ax = plt.subplots(figsize=(max(9.0, 0.9 * len(designs) + 2.0), 6.0), facecolor=SURFACE)
-
-    for i, design in enumerate(designs):
-        _dot_strip(ax, i, rates.loc[rates["design"] == design, "rate"], PARTICIPANT)
-
-    _reference_band(ax, -0.5, len(designs) - 0.5, baseline["rate"].mean(), baseline["rate"].std(), INFO,
-                     f"BCDJ simulated baseline (n={len(baseline)} seeds)")
-    ax.plot([-0.5, len(designs) - 0.5], [gt["all"], gt["all"]], color=INK, linewidth=1.8, zorder=2,
-            label=f"ground truth (empirical, n={gt['n']})")
-
-    ax.set_xlim(-0.5, len(designs) - 0.5)
-    ax.set_xticks(range(len(designs)))
     reps_per = rates.groupby("design")["replicate"].nunique()
-    ticks = [f"{d}\n(n={reps_per[d]})" for d in designs]
-    ax.set_xticklabels(ticks, fontsize=8, family="monospace", color=INK_2)
+    b_mean, b_sd = mean_sd(baseline["rate"])
+    span = (-0.62, len(designs) - 0.38)
+    label_x = span[1] + 0.30
+
+    fig, ax = plt.subplots(figsize=(max(9.0, 0.95 * len(designs) + 4.4), 5.4), facecolor=SURFACE)
+
+    multiples = []
+    for i, design in enumerate(designs):
+        mean, se = mean_se(rates.loc[rates["design"] == design, "rate"])
+        _bar(ax, i, mean, se, PARTICIPANT, width=0.62)
+        multiples.append(mean / truth)
+
+    # Both references over the bars they refer to, rather than under them: the
+    # comparison is the point of the figure, and a bar drawn from zero would
+    # otherwise bury the two levels it is being read against. Their names and the
+    # baseline's spread go in the right margin, clear of every bar.
+    ax.plot(span, [b_mean, b_mean], color=INFO, linewidth=1.4, linestyle=(0, (5, 4)), zorder=6)
+    ax.errorbar(label_x, b_mean, yerr=b_sd, fmt="none", ecolor=INFO, elinewidth=1.1, capsize=3.0, capthick=1.1,
+                zorder=6)
+    ax.annotate(f"BCDJ logit {b_mean:.1%} +/-{b_sd:.1%}", (label_x + 0.16, b_mean), va="center", ha="left",
+                fontsize=8, color=INFO, zorder=7)
+    ax.plot(span, [truth, truth], color=INK, linewidth=1.6, zorder=6)
+    ax.annotate(f"ground truth {truth:.1%}", (label_x, truth), va="center", ha="left", fontsize=8, color=INK,
+                zorder=7)
+
+    ax.set_xlim(span[0], span[1] + MARGIN)
+    _column_ticks(ax, designs, [f"S={reps_per[d]}" for d in designs])
     _style_axis(ax, "adoption rate (whole population)")
-    ax.set_title(f"Village {village} -- adoption rate by design", fontsize=13, color=INK, loc="left", pad=10)
-
-    handles = [
-        Line2D([], [], marker="o", ls="", ms=7, mfc=PARTICIPANT, mec=SURFACE, label="hybrid run (each dot: one replicate)"),
-        Line2D([], [], color=INFO, lw=1.6, ls="--", label=f"BCDJ simulated baseline (mean +/- std, n={len(baseline)} seeds)"),
-        Line2D([], [], color=INK, lw=1.8, label=f"ground truth (empirical, n={gt['n']})"),
-    ]
-    ax.legend(handles=handles, loc="upper left", frameon=False, fontsize=8.5, labelcolor=INK_2, borderaxespad=0.3)
-    fig.text(0.005, 0.005,
-              "denominator: full giant-component village (households never asked count as not adopted)",
-              fontsize=7.5, color=MUTED)
-    fig.tight_layout(rect=(0.0, 0.02, 1.0, 1.0))
-
-    if outfile is not None:
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(outfile, dpi=200, facecolor=SURFACE, bbox_inches="tight")
-        print(f"wrote {outfile}")
+    ax.set_title(f"Village {village} -- adoption rate by design, against the take-up it is aiming at",
+                 fontsize=13, color=INK, loc="left", pad=38)
+    _legend(ax, [
+        _swatch(PARTICIPANT, "design mean over replicates (whisker: +/-1 SE)"),
+        Line2D([], [], color=INK, lw=1.6, label=f"ground truth (empirical, n={gt['n']})"),
+        Line2D([], [], color=INFO, lw=1.4, ls=(0, (5, 4)), label=f"BCDJ simulated baseline (mean +/-1 SD, "
+                                                                f"{len(baseline)} seeds)"),
+    ])
+    bottom = _footnote(fig,
+        f"denominator: full giant-component village, n={gt['n']} (a household never asked was never informed and "
+        "counts as not adopted). every design overshoots the village's real take-up, by "
+        f"{min(multiples):.1f}x to {max(multiples):.1f}x. the baseline's spread is +/-1 SD over its seeds, not "
+        "the SE of its mean: it stands in for one realisation of village 6, which is what a design is compared "
+        "against.")
+    fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+    _save(fig, outfile, dpi)
     return fig
 
 
@@ -310,64 +459,80 @@ def plot_adoption_leader_split(
     village: int = VILLAGE,
     root: Path | str | None = None,
     outfile: Path | None = None,
+    dpi: int = 200,
 ) -> plt.Figure:
-    """Leader and non-leader adoption rate per design, same two baselines each.
+    """Leader and non-leader adoption rate per design, with both references as their own columns.
 
     Ground truth has leaders adopt *less* than non-leaders (13.6% vs 25.9% on
     village 6) -- the MFI's direct pitch to a leader is not the same as a
-    neighbour's endorsement, and BCDJ's own logit is fit on leaders only, so it
-    reproduces the reversal by construction. Whether any hybrid design does is
-    the question this figure is for.
+    neighbour's endorsement, and BCDJ's own logit is fit on leaders only. Whether
+    any hybrid design reproduces the reversal is the question this figure is for,
+    so the two references are drawn as columns in the same two-bar mark as the
+    designs rather than as horizontal lines: four levels crammed into the
+    0.13-0.30 band were unreadable, and a column puts the reference's own
+    leader/non-leader gap in exactly the form the designs' gaps are in.
     """
     rates = rates if rates is not None else load_design_rates(village=village, root=root)
     baseline = baseline if baseline is not None else bcdj_baseline(village=village, root=root)
     gt = ground_truth_rates(village, root=root)
 
     designs = sorted(rates["design"].unique())
-    width = 0.32
-    fig, ax = plt.subplots(figsize=(max(9.5, 1.1 * len(designs) + 2.0), 6.4), facecolor=SURFACE)
+    reps_per = rates.groupby("design")["replicate"].nunique()
 
-    for i, design in enumerate(designs):
+    columns: list[dict] = [
+        {"label": "ground truth", "count": f"n={gt['n']}", "alpha": 0.45,
+         "leader": (gt["leaders"], float("nan")), "non_leader": (gt["non_leaders"], float("nan"))},
+        {"label": "BCDJ logit", "count": f"{len(baseline)} seeds", "alpha": 0.45,
+         "leader": mean_sd(baseline["leader_rate"]), "non_leader": mean_sd(baseline["non_leader_rate"])},
+    ]
+    for design in designs:
         sub = rates.loc[rates["design"] == design]
-        _dot_strip(ax, i - width, sub["leader_rate"], PARTICIPANT, width=width * 0.8)
-        _dot_strip(ax, i + width, sub["non_leader_rate"], "#c2410c", width=width * 0.8)  # darker orange, same family
+        columns.append({"label": design, "count": f"S={reps_per[design]}", "alpha": 0.9,
+                        "leader": mean_se(sub["leader_rate"]), "non_leader": mean_se(sub["non_leader_rate"])})
 
-    span = (-0.5, len(designs) - 0.5)
-    _reference_band(ax, *span, baseline["leader_rate"].mean(), baseline["leader_rate"].std(), INFO,
-                     "BCDJ baseline, leaders")
-    _reference_band(ax, *span, baseline["non_leader_rate"].mean(), baseline["non_leader_rate"].std(), "#7fb2e8",
-                     "BCDJ baseline, non-leaders")
-    ax.plot(span, [gt["leaders"], gt["leaders"]], color=INK, linewidth=1.8, zorder=2)
-    ax.plot(span, [gt["non_leaders"], gt["non_leaders"]], color=INK, linewidth=1.8, linestyle=":", zorder=2)
+    width = 0.38
+    span = (-0.62, len(columns) - 0.38)
+    fig, ax = plt.subplots(figsize=(max(9.5, 1.15 * len(columns) + 2.6), 5.4), facecolor=SURFACE)
+
+    # A column whose two bars come out the wrong way round is flagged on its tick,
+    # the way the pilots flag a design -- but only while the flag discriminates.
+    # Every design reversing the order is the footnote's finding, not nine red
+    # ticks': painting the whole axis red would say it once per column and point
+    # at nothing.
+    flagged = {col["label"] for col in columns if col["leader"][0] >= col["non_leader"][0]}
+    for i, col in enumerate(columns):
+        lead_mean, lead_spread = col["leader"]
+        non_mean, non_spread = col["non_leader"]
+        _bar(ax, i - width / 2, lead_mean, lead_spread, LEADER, width, alpha=col["alpha"])
+        _bar(ax, i + width / 2, non_mean, non_spread, NON_LEADER, width, alpha=col["alpha"])
+    reversed_count = len(flagged & set(designs))
+    if reversed_count == len(designs):
+        flagged = set()
+
+    ax.axvline(1.5, color=HAIRLINE, linewidth=1.0, zorder=1)  # references left of it, runs right
 
     ax.set_xlim(*span)
-    ax.set_xticks(range(len(designs)))
-    reps_per = rates.groupby("design")["replicate"].nunique()
-    ax.set_xticklabels([f"{d}\n(n={reps_per[d]})" for d in designs], fontsize=8, family="monospace", color=INK_2)
+    _column_ticks(ax, [c["label"] for c in columns], [c["count"] for c in columns], n_reference=2,
+                  flagged=flagged)
     _style_axis(ax, "adoption rate")
-    ax.set_title(f"Village {village} -- adoption rate by design, leaders vs non-leaders", fontsize=13, color=INK,
-                 loc="left", pad=10)
-
+    ax.set_title(f"Village {village} -- leaders vs non-leaders, by design",
+                 fontsize=13, color=INK, loc="left", pad=38)
     handles = [
-        Line2D([], [], marker="o", ls="", ms=7, mfc=PARTICIPANT, mec=SURFACE, label="hybrid: leaders"),
-        Line2D([], [], marker="o", ls="", ms=7, mfc="#c2410c", mec=SURFACE, label="hybrid: non-leaders"),
-        Line2D([], [], color=INFO, lw=1.6, ls="--", label="BCDJ baseline: leaders"),
-        Line2D([], [], color="#7fb2e8", lw=1.6, ls="--", label="BCDJ baseline: non-leaders"),
-        Line2D([], [], color=INK, lw=1.8, label=f"ground truth: leaders ({gt['leaders']:.1%})"),
-        Line2D([], [], color=INK, lw=1.8, ls=":", label=f"ground truth: non-leaders ({gt['non_leaders']:.1%})"),
+        _swatch(LEADER, f"leaders (n={gt['n_leaders']})"),
+        _swatch(NON_LEADER, f"non-leaders (n={gt['n_non_leaders']})"),
+        _swatch(MUTED, "reference column (paler)", alpha=0.45),
     ]
-    ax.legend(handles=handles, loc="upper left", frameon=False, fontsize=8, labelcolor=INK_2, ncols=2,
-              borderaxespad=0.3)
-    fig.text(0.005, 0.005,
-              f"n_leaders={gt['n_leaders']}, n_non_leaders={gt['n_non_leaders']} (giant component); "
-              "households never asked count as not adopted",
-              fontsize=7.5, color=MUTED)
-    fig.tight_layout(rect=(0.0, 0.02, 1.0, 1.0))
-
-    if outfile is not None:
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(outfile, dpi=200, facecolor=SURFACE, bbox_inches="tight")
-        print(f"wrote {outfile}")
+    if flagged:
+        handles.append(Line2D([], [], marker="$!$", ls="", ms=7, mfc=WARNING, mec=WARNING,
+                              label="flagged tick: leaders adopt more, reversing ground truth's order"))
+    _legend(ax, handles)
+    bottom = _footnote(fig,
+        f"ground truth: {gt['leaders']:.1%} of leaders against {gt['non_leaders']:.1%} of non-leaders -- "
+        f"{reversed_count} of {len(designs)} designs put the two the other way round. giant component, households "
+        "never asked count as not adopted. whiskers: +/-1 SE of the mean over a design's replicates, +/-1 SD over "
+        "the baseline's seeds; ground truth is one realisation and has none.")
+    fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+    _save(fig, outfile, dpi)
     return fig
 
 
@@ -452,42 +617,53 @@ def plot_household_auc(
     village: int = VILLAGE,
     root: Path | str | None = None,
     outfile: Path | None = None,
+    dpi: int = 200,
 ) -> plt.Figure:
+    """Each design's ranking AUC, on the same 0-100% frame as the other two panels.
+
+    The frame is not zoomed to the designs even though they all sit near the
+    middle of it, for the same reason the other two panels are not: a reader
+    stepping between the three figures should not have to re-read the axis. What
+    the zoom would have bought is bought instead by the chance line drawn over
+    the bars and the estimate printed above each whisker.
+    """
     table = table if table is not None else household_auc(village=village, root=root)
     designs = list(table["design"])
+    span = (-0.62, len(designs) - 0.38)
 
-    fig, ax = plt.subplots(figsize=(max(8.0, 0.9 * len(designs) + 2.0), 5.6), facecolor=SURFACE)
-    x = np.arange(len(designs))
-    err = np.vstack([table["auc"] - table["ci_lo"], table["ci_hi"] - table["auc"]])
-    ax.bar(x, table["auc"], width=0.55, color=PARTICIPANT, alpha=0.75, edgecolor=PARTICIPANT, zorder=3)
-    ax.errorbar(x, table["auc"], yerr=err, fmt="none", ecolor=INK_2, elinewidth=1.1, capsize=3, zorder=4)
-    ax.axhline(0.5, color=INK, linewidth=1.4, linestyle="--", zorder=2, label="chance (AUC = 0.5)")
+    fig, ax = plt.subplots(figsize=(max(9.0, 0.95 * len(designs) + 4.4), 4.8), facecolor=SURFACE)
 
-    ax.set_xticks(x)
-    ticks = [f"{d}\n(n={r})" for d, r in zip(table["design"], table["n_replicates"])]
-    ax.set_xticklabels(ticks, fontsize=8, family="monospace", color=INK_2)
-    ax.set_ylim(0.0, 1.0)
-    ax.set_ylabel("AUC: household's share-of-replicates-adopted vs. true adoption", fontsize=9.5, color=INK_2)
-    ax.set_title(f"Village {village} -- does each design rank households correctly, even where the level is wrong?",
-                 fontsize=12.5, color=INK, loc="left", pad=10)
-    ax.set_facecolor(SURFACE)
-    ax.grid(axis="y", color=HAIRLINE, linewidth=0.6, zorder=0)
-    ax.set_axisbelow(True)
-    ax.tick_params(axis="y", labelsize=9, colors=INK_2)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(HAIRLINE)
-    ax.legend(loc="upper right", frameon=False, fontsize=9, labelcolor=INK_2)
-    fig.text(0.005, 0.005,
-              "whiskers: 90% bootstrap CI over households (500 resamples), not over replicates",
-              fontsize=7.5, color=MUTED)
-    fig.tight_layout(rect=(0.0, 0.02, 1.0, 1.0))
+    for i, row in enumerate(table.itertuples()):
+        top = _asymmetric_bar(ax, i, row.auc, row.ci_lo, row.ci_hi, PARTICIPANT, width=0.62)
+        clears = row.ci_lo > 0.5
+        ax.annotate(f"{row.auc:.2f}", (i, top), textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=8, color=INK if clears else INK_2, zorder=5)
 
-    if outfile is not None:
-        outfile.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(outfile, dpi=200, facecolor=SURFACE, bbox_inches="tight")
-        print(f"wrote {outfile}")
+    # Chance over the bars, not behind them: 0.5 is this scale's null, and it is
+    # the only line on the panel a bar can be on the wrong side of.
+    ax.plot(span, [0.5, 0.5], color=INK, linewidth=1.6, zorder=6)
+    ax.annotate("chance (AUC = 0.5)", (span[1] + 0.30, 0.5), va="center", ha="left", fontsize=8, color=INK,
+                zorder=7)
+
+    ax.set_xlim(span[0], span[1] + MARGIN)
+    _column_ticks(ax, designs, [f"S={n}" for n in table["n_replicates"]])
+    _style_axis(ax, "AUC: share of replicates adopted vs. true adoption")
+    ax.set_title(f"Village {village} -- does a design rank households correctly, even at the wrong level?",
+                 fontsize=13, color=INK, loc="left", pad=38)
+    _legend(ax, [
+        _swatch(PARTICIPANT, "AUC estimate (whisker: 90% bootstrap CI over households)"),
+        Line2D([], [], color=INK, lw=1.6, label="chance (AUC = 0.5)"),
+    ])
+
+    n_clear = int((table["ci_lo"] > 0.5).sum())
+    bottom = _footnote(fig,
+        f"{n_clear} of {len(designs)} designs keep their whole interval above chance (those estimates are printed "
+        "in black). the CI is 500 bootstrap resamples over households, not over replicates: it says how far the "
+        "AUC estimate would move under a different draw of village 6's households, not how many more replicates "
+        "the design needs. a design at S replicates can only score a household at multiples of 1/S, so a small S "
+        "coarsens the ranking it is being credited with.")
+    fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+    _save(fig, outfile, dpi)
     return fig
 
 
@@ -515,15 +691,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.view in ("all", "adoption"):
         fig = plot_adoption_by_design(rates, baseline, village=a.village, root=a.root,
-                                       outfile=a.out_dir / "adoption_by_design.png")
+                                       outfile=a.out_dir / "adoption_by_design.png", dpi=a.dpi)
         plt.close(fig)
     if a.view in ("all", "leader-split"):
         fig = plot_adoption_leader_split(rates, baseline, village=a.village, root=a.root,
-                                          outfile=a.out_dir / "adoption_leader_split.png")
+                                          outfile=a.out_dir / "adoption_leader_split.png", dpi=a.dpi)
         plt.close(fig)
     if a.view in ("all", "auc"):
         table = household_auc(model=model, village=a.village, output_dir=a.output_dir, root=a.root)
-        fig = plot_household_auc(table, village=a.village, root=a.root, outfile=a.out_dir / "household_auc.png")
+        fig = plot_household_auc(table, village=a.village, root=a.root, outfile=a.out_dir / "household_auc.png",
+                                  dpi=a.dpi)
         plt.close(fig)
     return 0
 

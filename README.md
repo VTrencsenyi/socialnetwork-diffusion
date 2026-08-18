@@ -13,3 +13,5 @@ been mapped ~6 months beforehand, we know both the seeds and the true outcome.
 That makes it one of the few diffusion datasets with a real ground truth to score
 a simulation against.
 
+# HOW TO RUN
+

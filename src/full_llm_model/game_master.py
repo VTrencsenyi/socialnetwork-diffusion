@@ -8,12 +8,22 @@ one is selected uniformly and reaches it for the following round.
 
 	python -m src.full_llm_model.game_master --adoption A1B0C1D0 --transmission A1B1D0
 	python -m src.full_llm_model.game_master --adoption A1B0C1D0 --transmission A1B1D0 --live
+
+Logs land in ``output/full_llm/<agent>/<adoption>-<transmission>/``. The design
+pair is one folder, not two nested ones: the pair is the unit that was run, and
+a transmission design under two adoption designs is two runs with nothing in
+common but a name. ``src/full_llm_model/analysis.py`` mirrors this path exactly
+under ``figures/full_llm/``, so a folder of logs and its folder of figures are
+the same three components in the same order.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,10 +97,49 @@ Do you wish to say something to your neighbour? Answer these questions:
 
 End your response on a new line with {Y} for yes or {N} for no, and nothing else.
 """
+TRANSMISSION_DT = """
+You should decide whether you inform your neighbour by conducting a decision-theoretic analysis.
+
+Use everything you have been told and your own subjective judgement to fill out a decision matrix over two actions -- informing your neighbour about the programme or not -- and two states of nature describing what they will do: they end up joining the programme or they end up not joining.
+
+For each state, estimate the probability that it is the state you are in, give the utility you would receive under that state from each of the two actions, and state the evidence that justifies those numbers. The two probabilities must sum to 1.
+
+Then give your decision: Y if you decide to inform your neighbour, N if you decide not to inform them.
+"""
 
 TRANSMISSION_PROFILE_LEVELS = ("", "DEMOGRAPHIC", "NARRATIVE")
 TRANSMISSION_TARGET_LEVELS = ("", "DEMOGRAPHIC", "NARRATIVE")
-TRANSMISSION_INSTRUCTION_LEVELS = ("", "MOA")
+TRANSMISSION_INSTRUCTION_LEVELS = ("", "MOA", "DT")
+
+TRANSMISSION_DT_STATES = ("they_join", "they_dont_join")
+_TRANSMISSION_DT_STATE_SCHEMA = {
+	"type": "object",
+	"additionalProperties": False,
+	"required": ["probability", "Y_utility", "N_utility", "evidence"],
+	"properties": {
+		"probability": {"type": "number"},
+		"Y_utility": {"type": "number"},
+		"N_utility": {"type": "number"},
+		"evidence": {"type": "array", "items": {"type": "string"}},
+	},
+}
+TRANSMISSION_DT_SCHEMA = {
+	"type": "object",
+	"additionalProperties": False,
+	"required": ["states", "decision"],
+	"properties": {
+		"states": {
+			"type": "object",
+			"additionalProperties": False,
+			"required": list(TRANSMISSION_DT_STATES),
+			"properties": {state: _TRANSMISSION_DT_STATE_SCHEMA for state in TRANSMISSION_DT_STATES},
+		},
+		"decision": {"type": "string", "enum": ["Y", "N"]},
+	},
+}
+TRANSMISSION_DT_FORMAT = {
+	"format": {"type": "json_schema", "name": "transmission_dt_analysis", "strict": True, "schema": TRANSMISSION_DT_SCHEMA}
+}
 
 
 def transmission_label(design: tuple[str, str, str]) -> str:
@@ -108,8 +157,6 @@ def transmission_label(design: tuple[str, str, str]) -> str:
 
 def parse_transmission_design(label: str) -> tuple[str, str, str]:
 	"""Parse ``A1B1D0`` into the three transmission prompt levels."""
-	import re
-
 	match = re.fullmatch(r"A(\d)B(\d)D(\d)", label.strip(), flags=re.IGNORECASE)
 	if not match:
 		raise ValueError(f"not a transmission design: {label!r}; expected e.g. A1B1D0")
@@ -125,6 +172,27 @@ def parse_transmission_design(label: str) -> tuple[str, str, str]:
 			raise ValueError(f"{label}: level {index} is unavailable")
 		values.append(levels[index])
 	return tuple(values)  # type: ignore[return-value]
+
+
+PAIR_SEPARATOR = "-"
+_PAIR = re.compile(r"^(?P<adoption>A\dB\dC\dD\d)-(?P<transmission>A\dB\dD\d)$", flags=re.IGNORECASE)
+
+
+def pair_slug(adoption: str, transmission: str) -> str:
+	"""``("A1B0C0D2", "A0B0D2") -> "A1B0C0D2-A0B0D2"`` -- one design pair, one folder name.
+
+	Both labels start with ``A`` and only the adoption one carries a ``C`` axis,
+	so the separator is unambiguous in both directions.
+	"""
+	return f"{adoption}{PAIR_SEPARATOR}{transmission}"
+
+
+def parse_pair_slug(slug: str) -> tuple[str, str]:
+	"""Split a folder name back into ``(adoption_design, transmission_design)``."""
+	match = _PAIR.match(slug.strip())
+	if not match:
+		raise ValueError(f"not a design-pair folder: {slug!r}; expected e.g. A1B0C0D2-A0B0D2")
+	return match["adoption"].upper(), match["transmission"].upper()
 
 
 def transmission_prompt(
@@ -155,9 +223,81 @@ def transmission_prompt(
 	if target_profile:
 		template = TARGET_PROFILE if target_profile == "DEMOGRAPHIC" else TARGET_NARRATIVE
 		parts.append(template.format(**target.fields))
-	template = TRANSMISSION_MOA if instruction == "MOA" else TRANSMISSION_FORMAT
+	template = {"": TRANSMISSION_FORMAT, "MOA": TRANSMISSION_MOA, "DT": TRANSMISSION_DT}[instruction]
 	parts.append(template.format(Y=hybrid.YES_TOKEN, N=hybrid.NO_TOKEN))
 	return "\n\n".join(part.strip() for part in parts if part.strip())
+
+
+def parse_transmission_dt(response: str) -> dict | None:
+	"""Return a usable two-state transmission decision matrix, if one was returned."""
+	text = (response or "").strip()
+	try:
+		payload = json.loads(text)
+	except json.JSONDecodeError:
+		start, end = text.find("{"), text.rfind("}")
+		if start < 0 or end <= start:
+			return None
+		try:
+			payload = json.loads(text[start : end + 1])
+		except json.JSONDecodeError:
+			return None
+
+	if not isinstance(payload, dict) or payload.get("decision") not in ("Y", "N"):
+		return None
+	states = payload.get("states")
+	if not isinstance(states, dict) or set(states) != set(TRANSMISSION_DT_STATES):
+		return None
+	for state in TRANSMISSION_DT_STATES:
+		block = states[state]
+		if not isinstance(block, dict):
+			return None
+		try:
+			values = [float(block[key]) for key in ("probability", "Y_utility", "N_utility")]
+		except (KeyError, TypeError, ValueError):
+			return None
+		if not all(math.isfinite(value) for value in values):
+			return None
+	return payload
+
+
+def get_transmission_response(
+	llm: hybrid.LLMs,
+	prompt: str,
+	instruction: str = "",
+	max_parse_attempts: int = 2,
+) -> hybrid.Response:
+	"""One edge-level LLM decision, using the transmission-specific DT schema."""
+	if instruction not in TRANSMISSION_INSTRUCTION_LEVELS:
+		raise ValueError(f"invalid transmission instruction: {instruction!r}")
+	if llm not in hybrid.WIRED_UP:
+		raise NotImplementedError(f"{llm.value} is not wired up yet")
+	if max_parse_attempts < 1:
+		raise ValueError("max_parse_attempts must be >= 1")
+
+	request: dict[str, object] = {"model": llm.value, "input": prompt}
+	if llm in hybrid.REASONING_EFFORT:
+		request["reasoning"] = {"effort": hybrid.REASONING_EFFORT[llm]}
+	if instruction == "DT":
+		request["text"] = TRANSMISSION_DT_FORMAT
+
+	text, decision, usage = "", hybrid.PARSING_ERROR, {}
+	for attempt in range(1, max_parse_attempts + 1):
+		text, usage = hybrid.one_call(
+			hybrid._client(hybrid.PROVIDERS[llm]), request, max_output_tokens=hybrid.MAX_OUTPUT_TOKENS
+		)
+		if instruction == "DT":
+			payload = parse_transmission_dt(text)
+			decision = hybrid.PARSING_ERROR if payload is None else (
+				hybrid.YES_TOKEN if payload["decision"] == "Y" else hybrid.NO_TOKEN
+			)
+		else:
+			try:
+				decision = hybrid.extract_decision(text)
+			except ValueError:
+				decision = hybrid.PARSING_ERROR
+		if decision != hybrid.PARSING_ERROR:
+			return hybrid.Response(text=text, decision=decision, usage=usage, attempts=attempt)
+	return hybrid.Response(text=text, decision=hybrid.PARSING_ERROR, usage=usage, attempts=max_parse_attempts)
 
 
 @dataclass
@@ -204,7 +344,7 @@ def decide_transmissions(
 	round_r: int,
 	landing_rng: np.random.Generator,
 	max_workers: int = 8,
-	responder=hybrid.get_response,
+	responder=get_transmission_response,
 	progress: tqdm | None = None,
 ) -> tuple[np.ndarray, list[TransmissionDecision]]:
 	"""Elicit all eligible edges and choose one successful sender per target.
@@ -238,7 +378,7 @@ def decide_transmissions(
 
 	def ask(record: TransmissionDecision) -> TransmissionDecision:
 		try:
-			reply = responder(llm, record.prompt, "")
+			reply = responder(llm, record.prompt, design[2])
 		except Exception as exc:  # one failed edge becomes a logged non-transmission
 			record.error = f"{type(exc).__name__}: {exc}"
 			return record
@@ -277,6 +417,26 @@ class FullRunResult:
 	transmission_design: str
 	transmissions: list[TransmissionDecision]
 
+	def transmission_summary(self) -> str:
+		"""Transmission decisions by the sender's simulated adoption state.
+
+		``transmitted`` is the LLM's edge-level decision. ``landed`` is the
+		one-success-per-target result after simultaneous senders are resolved.
+		"""
+		def rate(decisions: list[TransmissionDecision], attribute: str) -> str:
+			if not decisions:
+				return "n/a"
+			return f"{sum(bool(getattr(d, attribute)) for d in decisions) / len(decisions):.1%} ({sum(bool(getattr(d, attribute)) for d in decisions)}/{len(decisions)})"
+
+		adopters = [decision for decision in self.transmissions if decision.sender_adopted]
+		non_adopters = [decision for decision in self.transmissions if not decision.sender_adopted]
+		return (
+			f"transmitted all {rate(self.transmissions, 'transmitted')}; "
+			f"adopters {rate(adopters, 'transmitted')}; "
+			f"non-adopters {rate(non_adopters, 'transmitted')}; "
+			f"landed {rate(self.transmissions, 'landed')}"
+		)
+
 	@property
 	def errors(self) -> list[object]:
 		return [*self.run.errors, *(d for d in self.transmissions if d.error)]
@@ -299,7 +459,7 @@ def full_llm_run(
 	final_sweep: bool = False,
 	max_workers: int = 8,
 	adoption_responder=hybrid.get_response,
-	transmission_responder=hybrid.get_response,
+	transmission_responder=get_transmission_response,
 	progress: tqdm | None = None,
 ) -> FullRunResult:
 	"""One fresh full-LLM replicate under the BCDJ one-shot adoption timing."""
@@ -397,9 +557,13 @@ def _stub_responder(llm: hybrid.LLMs, prompt: str, instruction: str = "") -> hyb
 
 
 def write_result(result: FullRunResult, output_dir: Path | str = OUTPUT_DIR) -> tuple[Path, Path]:
-	"""Write separate adoption and transmission audit logs for one replicate."""
+	"""Write separate adoption and transmission audit logs for one replicate.
+
+	Into ``<output_dir>/<agent>/<adoption>-<transmission>/`` -- the design pair
+	is one folder, matching where `analysis.py` puts that pair's figures.
+	"""
 	run = result.run
-	root = Path(output_dir) / run.llm.replace("-", "_") / run.design / result.transmission_design
+	root = Path(output_dir) / run.llm.replace("-", "_") / pair_slug(run.design, result.transmission_design)
 	root.mkdir(parents=True, exist_ok=True)
 	stem = f"v{run.village}_rep{run.replicate}"
 	adoption_path, transmission_path = root / f"{stem}_adoption.csv", root / f"{stem}_transmission.csv"
@@ -428,15 +592,17 @@ def main(argv: list[str] | None = None) -> int:
 	leaders, households = hybrid.build_village(args.village)
 	pop = hybrid.population(leaders, households)
 	A = hybrid.adjacency_matrix(pop)
-	responder = hybrid.get_response if args.live else _stub_responder
+	adoption_responder = hybrid.get_response if args.live else _stub_responder
+	transmission_responder = get_transmission_response if args.live else _stub_responder
 	for replicate in range(args.first_rep, args.first_rep + args.reps):
 		result = full_llm_run(
 			pop, A, adoption_design, tx_design, llm, village=args.village, seed=replicate,
-			replicate=replicate, max_workers=args.workers, adoption_responder=responder,
-			transmission_responder=responder,
+			replicate=replicate, max_workers=args.workers, adoption_responder=adoption_responder,
+			transmission_responder=transmission_responder,
 		)
 		adoption_path, transmission_path = write_result(result)
 		print(result.run.summary())
+		print(result.transmission_summary())
 		print(f"wrote {adoption_path} and {transmission_path}; transmission calls {len(result.transmissions)}")
 		if result.errors or result.parse_failures:
 			print(f"WARNING: {len(result.errors)} API errors, {len(result.parse_failures)} parsing errors")

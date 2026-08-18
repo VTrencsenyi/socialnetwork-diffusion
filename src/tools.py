@@ -15,33 +15,25 @@ Three jobs. The first two have a CLI; the third is library-only.
        python src/tools.py hh-features --villages 73 67
        -> output/features/hh_features_73.csv, output/features/hh_features_67.csv
 
-3. Wire that table and the real adjacency into `agent.HH_Agent` objects the
-   simulation can step -- `build_agents()`, plus the `seeds()` and
-   `missing_contexts()` pre-flight helpers. The agents themselves know nothing
-   about this module; construction lives here so `agent.py` stays free of
-   pandas and of any route to the feature table.
+3. Report the injection points that table implies -- `seeds()`, the hhids with
+   `has_leader == 1`.
 
-       agents = tools.build_agents(73)
+       seed_ids = tools.seeds(73)
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 try:
-    from . import agent as ag
     from . import data_loader as dl
-    from . import state as stt
 except ImportError:  # running as a script, not a package
-    import agent as ag
     import data_loader as dl
-    import state as stt
 
 
 def dta_to_csv(
@@ -378,64 +370,6 @@ def build_household_features(
             "_adopted": "Int64",
         }
     )
-
-
-# --------------------------------------------------------------------------
-# Agent construction (docs/household_design.md §5, network block)
-# --------------------------------------------------------------------------
-
-
-def build_agents(
-    village: int,
-    features_dir: Path | str = Path("output/features"),
-    context_dir: Path | str = ag.DEFAULT_CONTEXT_DIR,
-    root: Path | str | None = None,
-    state_version: str = "default",
-) -> dict[int, ag.HH_Agent]:
-    """Every household in `village` as an `HH_Agent`, keyed by hhid, wired to the real network.
-
-    Reads exactly two things and nothing else: `row` and `hhid` from
-    `output/features/hh_features_<village>.csv`, and the adjacency from
-    `data_loader.load_village()` -- which is also what guarantees row *i* of the
-    CSV is row *i* of the matrix. Every other column, the persona features and
-    `_adopted` alike, is left in the CSV on purpose: an agent that holds no
-    reference to the feature table cannot leak the target through one
-    (docs/household_design.md §1). This function is the one place that property
-    could quietly be lost, which is why the column selection is an explicit
-    `usecols` allowlist rather than a drop-list.
-
-    Isolates are included. They are genuine non-adopters and a free correctness
-    check (§7.2): a sane model must never have one adopt, since nobody can ever
-    speak to it.
-    """
-    path = Path(features_dir) / f"hh_features_{village}.csv"
-    ids = pd.read_csv(path, usecols=["row", "hhid"]).sort_values("row")
-    hh_ids = ids.hhid.to_numpy(dtype=int)
-
-    v = dl.load_village(village, root=root if root is not None else dl.DEFAULT_ROOT)
-    if len(hh_ids) != v.n:
-        raise stt.AgentError(f"v{village}: {len(hh_ids)} rows in {path.name} but {v.n} in the adjacency")
-
-    return {
-        int(hh): ag.HH_Agent(
-            hh_id=int(hh),
-            village=village,
-            row=i + 1,  # adjmatrix_key is 1-based; adjacency row i is key i + 1
-            neighbours=tuple(int(hh_ids[j]) for j in v.neighbours(i)),
-            context_dir=Path(context_dir),
-            state=stt.make_state(state_version),
-        )
-        for i, hh in enumerate(hh_ids)
-    }
-
-
-def missing_contexts(agents: Iterable[ag.HH_Agent]) -> list[int]:
-    """hh_ids with no context file. Call before spending money on a run.
-
-    Discovering a missing persona at t=4, several hundred API calls in, is an
-    expensive way to learn it.
-    """
-    return [a.hh_id for a in agents if not a.has_context]
 
 
 def seeds(village: int, features_dir: Path | str = Path("output/features")) -> list[int]:

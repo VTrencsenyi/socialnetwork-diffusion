@@ -90,7 +90,7 @@ You must highlight your decision with the token {Y} for yes or {N} for no at the
 DT_INSTRUCTION = """
 You should decide whether you inform your neighbour by conducting a decision-theoretic analysis.
 
-Use everything you have been told and your own subjective judgement to fill out a decision matrix over two actions -- informing your neighnour about the programme or not -- and two states of nature describing what they will do: they end up joining the programme or they end up not joining.
+Use everything you have been told and your own subjective judgement to fill out a decision matrix over two actions -- informing your neighbour about the programme or not -- and two states of nature describing what they will do: they end up joining the programme or they end up not joining.
 
 For each state, estimate the probability that it is the state you are in, give the utility you would receive under that state from each of the two actions, and state the evidence that justifies those numbers. The three probabilities must sum to 1.
 
@@ -553,6 +553,32 @@ def label_digit(label: str, letter: str) -> str:
     return str(label)[AXIS_POSITIONS[letter]]
 
 
+def strip_leader(label: str) -> str:
+    """`A1B0L1D2` -> `A1B0D2`: the label with the leader axis dropped.
+
+    The L0 and L1 variants of the same A/B/D combination share this label, which is
+    what lets `transmission_rates(..., merge_leader=True)` pool their repetitions
+    into one row by grouping on it -- read as: whether the ego is a leader is folded
+    into the count rather than kept as a fifth thing a design has to separate on.
+    """
+    return "".join(f"{letter}{label_digit(label, letter)}" for letter, _keyword, _levels in AXES if letter != "L")
+
+
+def all_designs_merged() -> list[str]:
+    """Every distinct A/B/D label, once each, in the grid's own order.
+
+    `all_designs()` steps A slowest and D fastest (`AXES` order), and dropping L
+    from each label leaves that order intact -- L is stepped between B and D, not
+    within either -- so a straight de-duplication keeps the leanest label first.
+    """
+    seen: list[str] = []
+    for design in all_designs():
+        label = strip_leader(design_label(*design))
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
 def log_path(llm: LLMs, label: str) -> Path:
     return OUTPUT_DIR / f"{llm.name.lower()}_{label}.csv"
 
@@ -826,7 +852,7 @@ def load_results(llm: LLMs | None = None, output_dir: Path = OUTPUT_DIR) -> pd.D
     return pd.concat(frames, ignore_index=True)
 
 
-def transmission_rates(results: pd.DataFrame) -> pd.DataFrame:
+def transmission_rates(results: pd.DataFrame, merge_leader: bool = False) -> pd.DataFrame:
     """One row per (llm, design, sample): the share of (Y) answers and its SE.
 
     (Y) here means the ego chose to tell its neighbour, so the rate is a
@@ -841,9 +867,15 @@ def transmission_rates(results: pd.DataFrame) -> pd.DataFrame:
     binary repetitions that is what "how firm is this rate" means. It is zero when
     every repetition agreed, which for a decisive model is a real result rather
     than a missing bar.
+
+    `merge_leader=True` relabels every row with `strip_leader` before counting, so
+    a design's L0 and L1 repetitions are pooled into one row under their shared
+    A/B/D label. `n`, `told` and `unparsed` are the sums of both variants', and the
+    rate and its SE follow from the pooled counts, not an average of two rates.
     """
+    frame = results.assign(design=results["design"].map(strip_leader)) if merge_leader else results
     rows = []
-    for (llm, design, sample), group in results.groupby(["llm", "design", "sample"], sort=False):
+    for (llm, design, sample), group in frame.groupby(["llm", "design", "sample"], sort=False):
         answered = group[group["decision"] != PARSING_ERROR]
         n = len(answered)
         told = int((answered["decision"] == YES_TOKEN).sum())
@@ -937,6 +969,7 @@ def plot_transmission_rates(
     llm: LLMs | None = None,
     rates: pd.DataFrame | None = None,
     outfile: Path | None = None,
+    merge_leader: bool = False,
 ) -> plt.Figure:
     """The transmission rate of every design, with standard-error bars, one row per model.
 
@@ -945,15 +978,21 @@ def plot_transmission_rates(
     order rather than alphabetical, which puts the leanest design first and steps
     through the axes in the order the labels number them.
 
+    `merge_leader=True` plots the pooled A/B/D designs `transmission_rates(...,
+    merge_leader=True)` produces instead of the full 54-design grid, ordered by
+    `all_designs_merged()`. It only changes the ordering fallback here: a `rates`
+    table passed in already carries whichever labels it was built with.
+
     Pass `outfile` to write it; the figure is returned either way.
     """
     if rates is None:
-        rates = transmission_rates(load_results(llm))
+        rates = transmission_rates(load_results(llm), merge_leader=merge_leader)
     if rates.empty:
         raise ValueError("Nothing to plot: the rate table is empty")
 
     present = set(rates["design"])
-    designs = [label for label in (design_label(*d) for d in all_designs()) if label in present]
+    ordered = all_designs_merged() if merge_leader else (design_label(*d) for d in all_designs())
+    designs = [label for label in ordered if label in present]
     designs += sorted(present - set(designs))  # anything logged under a label we no longer generate
     models = list(dict.fromkeys(rates["llm"]))
 
@@ -984,7 +1023,8 @@ def plot_transmission_rates(
         0.005,
         "bars: share of (Y) answers -- the ego told its neighbour"
         "   whiskers: SE of a proportion, sqrt(p(1-p)/n)"
-        "   *: design with unparsed responses, excluded from its rate",
+        "   *: design with unparsed responses, excluded from its rate"
+        + ("   labels: A/B/D only, L0 and L1 pooled" if merge_leader else ""),
         fontsize=7,
         color=MUTED,
     )
@@ -1235,6 +1275,7 @@ def transmission_rates_fisher(
     tests: pd.DataFrame | None = None,
     alpha: float = FDR_ALPHA,
     outfile: Path | None = None,
+    merge_leader: bool = False,
 ) -> plt.Figure:
     """Only the designs that separate the samples, one row per model.
 
@@ -1255,10 +1296,16 @@ def transmission_rates_fisher(
     for the main study, and reading it in q order alongside the usable designs would
     put it forward as one.
 
+    `merge_leader=True` pools each design's L0 and L1 repetitions into one A/B/D
+    row -- via `transmission_rates(..., merge_leader=True)` when `rates` is not
+    given, and via `design_tests` run on that pooled table when `tests` is not
+    given either -- so the Fisher test and the selection it drives are both over
+    the 18-design pooled grid rather than the 54-design one.
+
     Pass `outfile` to write it; the figure is returned either way.
     """
     if rates is None:
-        rates = transmission_rates(load_results(llm))
+        rates = transmission_rates(load_results(llm), merge_leader=merge_leader)
     if rates.empty:
         raise ValueError("Nothing to plot: the rate table is empty")
     if tests is None:
@@ -1297,7 +1344,8 @@ def transmission_rates_fisher(
             ax,
             rates[(rates["llm"] == model) & rates["design"].isin(labels)],
             labels,
-            f"{model}  ({len(usable) + len(wrong_way)}/{len(one)} designs separate the samples at q < {alpha})",
+            f"{model}  ({len(usable) + len(wrong_way)}/{len(one)} designs separate the samples at q < {alpha})"
+            + ("  -- L0/L1 pooled" if merge_leader else ""),
             flags={label: "†" for label in wrong_way},
         )
         # The rule is red because what it fences off is a warning: everything to its
@@ -1937,8 +1985,16 @@ MODEL_ALIASES = {"gpt": LLMs.GPT_5_4_NANO, "haiku": LLMs.HAIKU_4_5, "grok": LLMs
 
 DEFAULT_FIGURE = FIGURE_DIR / "transmission_rates.png"
 
-# Where each `plot --kind` writes, unless --outfile says otherwise.
-PLOT_KINDS = {"rates": DEFAULT_FIGURE, "fisher": FISHER_FIGURE, "dt": DT_FIGURE}
+# Where each `plot --kind` writes, unless --outfile says otherwise. The `-merged`
+# kinds are `rates` and `fisher` with each design's L0 and L1 repetitions pooled
+# into one A/B/D row (`strip_leader`) before the rate or the Fisher test is run.
+PLOT_KINDS = {
+    "rates": DEFAULT_FIGURE,
+    "fisher": FISHER_FIGURE,
+    "dt": DT_FIGURE,
+    "rates-merged": FIGURE_DIR / "transmission_rates_merged.png",
+    "fisher-merged": FIGURE_DIR / "transmission_rates_fisher_merged.png",
+}
 
 
 def resolve_model(label: str) -> LLMs:
@@ -2061,7 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=tuple(PLOT_KINDS),
         default="rates",
         help="rates: every design that has been run. fisher: only the designs that separate the "
-        "samples. dt: whether the DT decisions follow their own matrices. (default: rates)",
+        "samples. dt: whether the DT decisions follow their own matrices. *-merged: rates/fisher "
+        "with each design's L0 and L1 repetitions pooled into one A/B/D row. (default: rates)",
     )
     pl.add_argument("--alpha", type=float, default=FDR_ALPHA, help=f"--kind fisher: the FDR level (default: {FDR_ALPHA})")
     pl.add_argument(
@@ -2161,13 +2218,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.command == "plot":
         outfile = a.outfile or PLOT_KINDS[a.kind]
+        merge_leader = a.kind.endswith("-merged")
         try:
             if a.kind == "dt":
                 plot_dt_rationality(dt_frame(results), outfile=outfile)
-            elif a.kind == "fisher":
-                transmission_rates_fisher(rates=transmission_rates(results), alpha=a.alpha, outfile=outfile)
+            elif a.kind in ("fisher", "fisher-merged"):
+                transmission_rates_fisher(
+                    rates=transmission_rates(results, merge_leader=merge_leader),
+                    alpha=a.alpha,
+                    outfile=outfile,
+                    merge_leader=merge_leader,
+                )
             else:
-                plot_transmission_rates(rates=transmission_rates(results), outfile=outfile)
+                plot_transmission_rates(
+                    rates=transmission_rates(results, merge_leader=merge_leader),
+                    outfile=outfile,
+                    merge_leader=merge_leader,
+                )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1

@@ -88,3 +88,7 @@ tests/
 
 figures/misc/
 figures/pilot_v0/
+
+design_docs/
+report/token_costs.tex
+src/obsolete_code/
