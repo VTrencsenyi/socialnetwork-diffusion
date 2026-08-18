@@ -63,20 +63,24 @@ from matplotlib.patches import FancyArrowPatch
 try:
     from .data_loader import (
         DEFAULT_ROOT,
+        EXTRA_MF_VILLAGES,
         NETWORK_TYPES,
         DataError,
         Village,
         _panel_all,
+        analysis_villages,
         available_villages,
         load_village,
     )
 except ImportError:  # running as a script, not a package
     from data_loader import (  # type: ignore[no-redef]
         DEFAULT_ROOT,
+        EXTRA_MF_VILLAGES,
         NETWORK_TYPES,
         DataError,
         Village,
         _panel_all,
+        analysis_villages,
         available_villages,
         load_village,
     )
@@ -870,8 +874,13 @@ def plot_feature_correlation_all_villages(
     network_type: str = "allVillageRelationships",
     villages: list[int] | None = None,
 ) -> plt.Figure:
-    """Feature correlation heatmap pooled over every household in every village."""
-    villages = list(villages) if villages is not None else available_villages(root)
+    """Feature correlation heatmap pooled over every household in the 43-village analysis sample.
+
+    Defaults to `analysis_villages()`, not `available_villages()`: the 6 extra
+    villages with an MF outcome but no BSS program entry are outside the
+    paper's analysis scope and would otherwise be mixed in silently.
+    """
+    villages = list(villages) if villages is not None else analysis_villages(root)
     tables = []
     skipped = []
     for vil in villages:
@@ -887,10 +896,90 @@ def plot_feature_correlation_all_villages(
     pooled = pd.concat(tables, ignore_index=True)
     corr = pooled[CORR_FEATURES].corr()
 
+    extras = sorted(set(villages) & set(EXTRA_MF_VILLAGES))
+    extras_note = f"  Includes {len(extras)} village(s) outside the 43-village analysis sample: {extras}." if extras else ""
     fig, ax = plt.subplots(figsize=(9.6, 9.6), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
-    note = f"n={len(pooled)} households across {pooled['village'].nunique()} villages.  " + _CORR_NOTE
-    _draw_corr_heatmap(ax, corr, "All villages — pooled feature correlations", note)
+    note = f"n={len(pooled)} households across {pooled['village'].nunique()} villages.{extras_note}  " + _CORR_NOTE
+    _draw_corr_heatmap(ax, corr, "43-village analysis sample — pooled feature correlations", note)
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
+    return fig
+
+
+def plot_variance_explained_all_villages(
+    root: Path = DEFAULT_ROOT,
+    network_type: str = "allVillageRelationships",
+    villages: list[int] | None = None,
+) -> plt.Figure:
+    """Bar plot: how much of `_adopted`'s variance each heatmap feature explains alone, pooled over the
+
+    43-village analysis sample. With a single regressor, R² is just the
+    squared Pearson r -- the same pairwise-complete correlations
+    `plot_feature_correlation_all_villages` already puts in its `_adopted`
+    row/column, reread here as "variance explained" and ranked instead of laid
+    out as a matrix. Defaults to `analysis_villages()`, not
+    `available_villages()` -- see that function's docstring.
+    """
+    villages = list(villages) if villages is not None else analysis_villages(root)
+    tables = []
+    skipped = []
+    for vil in villages:
+        try:
+            v = load_village(vil, root=root, network_type=network_type)
+        except DataError:
+            skipped.append(vil)
+            continue
+        tables.append(household_feature_table(v))
+    if skipped:
+        print(f"  ! skipped {len(skipped)} village(s) with no usable data: {skipped}")
+
+    pooled = pd.concat(tables, ignore_index=True)
+    corr = pooled[CORR_FEATURES].corr()
+    r2 = (corr["_adopted"].drop("_adopted") ** 2).sort_values(ascending=False)
+
+    fig, ax = plt.subplots(figsize=(9.0, 6.0), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    y = np.arange(len(r2))
+    ax.barh(y, r2.values, color=INFO, edgecolor=SURFACE, linewidth=0.8, height=0.65, zorder=3)
+
+    xmax = np.nanmax(r2.values) if not np.all(np.isnan(r2.values)) else 0.0
+    for yi, val in zip(y, r2.values):
+        label = "–" if np.isnan(val) else f"{val:.3f}"
+        xpos = 0.0 if np.isnan(val) else val
+        ax.text(xpos + xmax * 0.02, yi, label, va="center", ha="left", fontsize=8.5, color=INK_2)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(r2.index, fontsize=9, color=INK_2)
+    ax.invert_yaxis()  # largest R^2 at top
+    ax.set_xlim(0, max(0.05, xmax * 1.25))
+    ax.set_xlabel("R² with _adopted  (squared pairwise-complete Pearson r)", fontsize=10, color=INK_2)
+    ax.set_title(
+        "43-village analysis sample — variance in adoption explained by each feature",
+        fontsize=13,
+        color=INK,
+        loc="left",
+        pad=10,
+    )
+    ax.tick_params(colors=INK_2, labelsize=9)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(HAIRLINE)
+    ax.grid(True, axis="x", color=HAIRLINE, linewidth=0.6, zorder=0)
+
+    extras = sorted(set(villages) & set(EXTRA_MF_VILLAGES))
+    extras_note = f"  Includes {len(extras)} village(s) outside the 43-village analysis sample: {extras}." if extras else ""
+    note = f"n={len(pooled)} households across {pooled['village'].nunique()} villages.{extras_note}  " + _CORR_NOTE
+    ax.text(
+        0.0,
+        -0.20,
+        "\n".join(textwrap.wrap(note, width=95)),
+        transform=ax.transAxes,
+        fontsize=7.8,
+        color=MUTED,
+        ha="left",
+        va="top",
+    )
     fig.tight_layout(rect=(0, 0.10, 1, 1))
     return fig
 
@@ -906,7 +995,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--view",
         default="outcome",
-        choices=("outcome", "hops", "panels", "all", "takeup", "horizon", "corr", "corr-all"),
+        choices=("outcome", "hops", "panels", "all", "takeup", "horizon", "corr", "corr-all", "var-explained"),
     )
     p.add_argument("--network", default="allVillageRelationships", choices=NETWORK_TYPES)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -921,16 +1010,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     a = p.parse_args(argv)
 
-    if a.view in ("takeup", "horizon", "corr-all"):
+    if a.view in ("takeup", "horizon", "corr-all", "var-explained"):
         if a.view == "takeup":
             fig = plot_takeup_by_village(root=a.root, horizon=a.horizon)
             name = "takeup_by_village" if a.horizon is None else f"takeup_by_village_horizon{a.horizon}"
         elif a.view == "horizon":
             fig = plot_takeup_horizon_histogram(root=a.root)
             name = "takeup_horizon_histogram"
-        else:
+        elif a.view == "corr-all":
             fig = plot_feature_correlation_all_villages(root=a.root, network_type=a.network)
             name = "feature_correlation_all_villages"
+        else:
+            fig = plot_variance_explained_all_villages(root=a.root, network_type=a.network)
+            name = "variance_explained_all_villages"
         out = a.out or Path("figures") / f"{name}.png"
         out.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out, dpi=a.dpi, facecolor=SURFACE, bbox_inches="tight")

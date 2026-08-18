@@ -13,7 +13,7 @@ Three jobs. The first two have a CLI; the third is library-only.
    write one CSV per village.
 
        python src/tools.py hh-features --villages 73 67
-       -> output/hh_features_73.csv, output/hh_features_67.csv
+       -> output/features/hh_features_73.csv, output/features/hh_features_67.csv
 
 3. Wire that table and the real adjacency into `agent.HH_Agent` objects the
    simulation can step -- `build_agents()`, plus the `seeds()` and
@@ -387,7 +387,7 @@ def build_household_features(
 
 def build_agents(
     village: int,
-    features_dir: Path | str = Path("output"),
+    features_dir: Path | str = Path("output/features"),
     context_dir: Path | str = ag.DEFAULT_CONTEXT_DIR,
     root: Path | str | None = None,
     state_version: str = "default",
@@ -395,7 +395,7 @@ def build_agents(
     """Every household in `village` as an `HH_Agent`, keyed by hhid, wired to the real network.
 
     Reads exactly two things and nothing else: `row` and `hhid` from
-    `output/hh_features_<village>.csv`, and the adjacency from
+    `output/features/hh_features_<village>.csv`, and the adjacency from
     `data_loader.load_village()` -- which is also what guarantees row *i* of the
     CSV is row *i* of the matrix. Every other column, the persona features and
     `_adopted` alike, is left in the CSV on purpose: an agent that holds no
@@ -438,7 +438,7 @@ def missing_contexts(agents: Iterable[ag.HH_Agent]) -> list[int]:
     return [a.hh_id for a in agents if not a.has_context]
 
 
-def seeds(village: int, features_dir: Path | str = Path("output")) -> list[int]:
+def seeds(village: int, features_dir: Path | str = Path("output/features")) -> list[int]:
     """hhids of the injection points -- `has_leader == 1` in the feature table.
 
     Not privileged (§4.7): the seed set is known ex ante and a household
@@ -499,8 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         "-o",
         "--output-dir",
         type=Path,
-        default=Path("output"),
-        help="directory for hh_features_<village>.csv (default: output)",
+        default=Path("output/features"),
+        help="directory for hh_features_<village>.csv (default: output/features)",
     )
 
     a = p.parse_args(argv)

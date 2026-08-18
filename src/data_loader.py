@@ -397,9 +397,19 @@ def check_consistency(v: Village, leader_row_ids: np.ndarray | None = None) -> l
 
 
 def available_villages(root: Path | str = DEFAULT_ROOT) -> list[int]:
-    """Villages that have a household-level microfinance outcome."""
+    """Villages that have a household-level microfinance outcome. 49 villages,
+
+    6 of which (EXTRA_MF_VILLAGES) are outside the paper's 43-village analysis
+    sample. Use `analysis_villages()` instead when the analysis is meant to
+    match the paper's scope.
+    """
     mat_dir = Path(root) / "Matlab Replication/India Networks"
     return sorted(int(p.stem[2:]) for p in mat_dir.glob("MF*.csv"))
+
+
+def analysis_villages(root: Path | str = DEFAULT_ROOT) -> list[int]:
+    """The paper's 43-village analysis sample: `available_villages()` minus EXTRA_MF_VILLAGES."""
+    return [v for v in available_villages(root) if v not in EXTRA_MF_VILLAGES]
 
 
 # --------------------------------------------------------------------------

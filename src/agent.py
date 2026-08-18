@@ -82,7 +82,7 @@ class HH_Agent:
         `docs/household_design.md` §4.6: a numeric id invites the model to
         invent orderings that do not exist.
     village, row
-        Provenance for the join back to `output/hh_features_<village>.csv` and
+        Provenance for the join back to `output/features/hh_features_<village>.csv` and
         to adjacency row `row` (1-based, i.e. `adjmatrix_key`). Optional, and
         evaluation-side only.
     neighbours
