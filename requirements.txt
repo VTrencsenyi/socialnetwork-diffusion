@@ -11,8 +11,9 @@ openai>=1.50
 # right call there; an exact test per design cell is not.
 scipy>=1.10
 
-# The pilot's progress bar. A full grid is 70 sequential API calls per model, and
-# a print per design says how far in but not how long is left.
+# The progress bars. A full pilot grid is 70 sequential API calls per model and a
+# hybrid run is one per household it reaches, and a print per design or per round
+# says how far in but not how long is left.
 tqdm>=4.66
 
 # tests
