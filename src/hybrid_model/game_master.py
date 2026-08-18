@@ -1,6 +1,7 @@
 """The hybrid model: BCDJ's information model, an LLM's adoption decision.
 
-    python -m src.hybrid_model.game_master --village 6 --dry-run
+    python -m src.hybrid_model.game_master --design A1B0C1D1            # dry run, no calls
+    python -m src.hybrid_model.game_master --design A1B0C1D1 --live     # one replicate, for real
 
 One run is one village. Transmission is `diffusion_model.m` step 2, transliterated
 and unchanged -- a node-level Bernoulli draw per ordered edge per round, at qP if
@@ -58,11 +59,13 @@ The ground truth is read separately, by the scorer, after a run is over.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
 import re
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
@@ -70,6 +73,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 try:
     from .. import data_loader as dl
@@ -1168,6 +1172,7 @@ def decide_round(
     informer_rng: np.random.Generator,
     max_workers: int = 8,
     responder: Callable[..., Response] | None = None,
+    progress: tqdm | None = None,
 ) -> list[Decision]:
     """Every household that has just heard, asked once, concurrently.
 
@@ -1207,6 +1212,9 @@ def decide_round(
     responder
         Injected for tests and dry runs; defaults to `get_response`. A dry run
         passes something that returns a canned `Response` and spends nothing.
+    progress
+        `main`'s bar, advanced one step per call as it lands. Optional, because a
+        round run from a notebook or a test has nothing to advance.
 
     Raises
     ------
@@ -1290,8 +1298,17 @@ def decide_round(
         record.usage = reply.usage
         return record
 
+    # Submitted rather than mapped, so the bar advances as each call lands
+    # instead of in submission order. The round is order-invariant by
+    # construction -- every prompt above was built before any of them was sent --
+    # so completion order is free to be whatever the provider makes it, and the
+    # slate is sorted back into `idx` order below.
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        decisions = list(pool.map(ask, work))
+        decisions = []
+        for future in as_completed([pool.submit(ask, item) for item in work]):
+            decisions.append(future.result())  # `ask` swallows its own exceptions
+            if progress is not None:
+                progress.update(1)
 
     if all(d.error for d in decisions):
         raise RuntimeError(
@@ -1470,9 +1487,13 @@ class RunResult:
 
     def summary(self) -> str:
         rate = self.adopted.sum() / self.n
+        leader_rate = self.adopted[self.is_leader].mean() if self.is_leader.any() else float("nan")
+        non_leader = ~self.is_leader
+        non_leader_rate = self.adopted[non_leader].mean() if non_leader.any() else float("nan")
         return (
             f"v{self.village} {self.arm} {self.design} rep {self.replicate}: "
             f"asked {int(self.asked.sum())}, joined {int(self.adopted.sum())} ({rate:.1%}), "
+            f"leaders {leader_rate:.1%}, non-leaders {non_leader_rate:.1%}, "
             f"informed {int(self.informed.sum())}/{self.n}, calls {self.n_calls}"
             + (f", ERRORS {len(self.errors)}" if self.errors else "")
         )
@@ -1493,6 +1514,7 @@ def hybrid_run(
     final_sweep: bool = False,
     max_workers: int = 8,
     responder: Callable[..., Response] | None = None,
+    progress: tqdm | None = None,
 ) -> RunResult:
     """One replicate: BCDJ's information model, an LLM's take-up decision.
 
@@ -1546,6 +1568,12 @@ def hybrid_run(
         and their `Decision.round` is `T + 1`.
     responder
         Injected for tests and dry runs; defaults to `get_response`.
+    progress
+        `main`'s bar, advanced one step per call and re-labelled each round with
+        how far through the village the information has got. A run cannot say up
+        front how many calls it will make -- that is the diffusion -- so the bar
+        is owned by the caller, which knows the upper bound of one call per
+        household per replicate.
 
     Raises
     ------
@@ -1586,10 +1614,12 @@ def hybrid_run(
 
     for r in range(1, rounds + 1):
         deciding = informed & ~asked
+        if progress is not None:
+            progress.set_postfix_str(f"round {r}/{rounds}, {int(deciding.sum())} asked", refresh=True)
         if deciding.any():
             batch = decide_round(
                 pop, deciding, adopted, hit, design, llm, r, informer_rng,
-                max_workers=max_workers, responder=responder,
+                max_workers=max_workers, responder=responder, progress=progress,
             )
             for d in batch:
                 if d.joined:
@@ -1619,10 +1649,12 @@ def hybrid_run(
         # transmission and no round of information flow, only the decisions the
         # loop already opened.
         deciding = informed & ~asked
+        if progress is not None:
+            progress.set_postfix_str(f"sweep, {int(deciding.sum())} asked", refresh=True)
         if deciding.any():
             batch = decide_round(
                 pop, deciding, adopted, hit, design, llm, rounds + 1, informer_rng,
-                max_workers=max_workers, responder=responder,
+                max_workers=max_workers, responder=responder, progress=progress,
             )
             for d in batch:
                 if d.joined:
@@ -1949,3 +1981,215 @@ def bcdj_run(
         curve=curve,
         info_curve=info_curve,
     )
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+# One CSV per (village, design, model, replicate), which is the same key the
+# pilot's logs are named by minus the replicate. A run is never appended to: a
+# paid replicate is a fact about one seed and one design, and two of them in one
+# file could not be told apart afterwards.
+OUTPUT_DIR = Path("output/hybrid")
+
+_LABEL = re.compile(r"^A(?P<a>\d)B(?P<b>\d)C(?P<c>\d)D(?P<d>\d)$", re.IGNORECASE)
+
+
+def parse_design(label: str) -> tuple[str, str, str, str]:
+    """`A1B0C1D1` -> the four levels `hybrid_run` takes.
+
+    The inverse of `design_label`, so a design named in the pilot's tables can be
+    handed to a run as the string it is named by rather than re-typed as four
+    levels in the right order.
+    """
+    match = _LABEL.match(label.strip())
+    if not match:
+        raise ValueError(f"not a design label: {label!r}; expected the pilot's form, e.g. A1B0C1D1")
+    axes = (PROFILE_LEVELS, INFORMER_LEVELS, ENDORSEMENT_LEVELS, INSTRUCTION_LEVELS)
+    levels = []
+    for key, axis in zip("abcd", axes):
+        digit = int(match[key])
+        if digit >= len(axis):
+            raise ValueError(f"{label}: axis {key.upper()} has {len(axis)} levels, so {key.upper()}{digit} is not one")
+        levels.append(axis[digit])
+    return tuple(levels)  # type: ignore[return-value]
+
+
+def run_path(
+    village: int,
+    design: str,
+    llm: LLMs,
+    replicate: int,
+    output_dir: Path | str = OUTPUT_DIR,
+) -> Path:
+    """`output/hybrid/gpt_5_4_nano/A1B0C1D1/v6_rep0.csv`.
+
+    One subfolder per model and, under it, one per design -- both are axes a
+    reader sorts runs by before ever looking at a replicate, and a directory
+    does that without parsing the filename.
+    """
+    return Path(output_dir) / llm.name.lower() / design / f"v{village}_rep{replicate}.csv"
+
+
+def write_decisions(result: RunResult, path: Path) -> Path:
+    """The run's log, one row per decision, in `Decision.to_row`'s columns."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([d.to_row() for d in result.decisions]).to_csv(path, index=False)
+    return path
+
+
+def _stub_responder(llm: LLMs, prompt: str, instruction: str = "") -> Response:
+    """A dry run's answer: a coin keyed on the prompt, and no API call.
+
+    Deterministic, so a dry run is repeatable and two dry runs of the same design
+    give the same histories -- but the decisions are *not* the model's, and the
+    adoption curve a dry run reports is therefore meaningless. What it is for is
+    the mechanics: that the village builds, that every prompt renders, and how
+    many calls the live run would pay for. A coin rather than all-yes because
+    the call count depends on the qP/qN split and an all-adopting village would
+    over-report it.
+    """
+    digest = hashlib.sha256(prompt.encode("utf-8")).digest()
+    decision = YES_TOKEN if digest[0] < 128 else NO_TOKEN
+    return Response(text="DRY RUN -- no call was made.", decision=decision, usage={}, attempts=0)
+
+
+def ground_truth_rates(
+    village: int,
+    giant_only: bool = True,
+    root: Path | str | None = None,
+) -> dict[str, float | int]:
+    """Human take-up for a village, on the same denominator a run sees.
+
+    Mirrors `build_village`'s `giant_only` pruning so the printed comparison and
+    the simulated one share a population. Reads straight from `dl.load_village`
+    rather than through `FEATURE_COLUMNS` -- this never touches an agent or a
+    prompt, only the terminal summary.
+    """
+    v = dl.load_village(village, root=root if root is not None else dl.DEFAULT_ROOT)
+    keep = v.in_giant.astype(bool) if (giant_only and v.in_giant is not None) else np.ones(v.n, dtype=bool)
+    leader = v.leader.astype(bool) & keep
+    non_leader = keep & ~v.leader.astype(bool)
+    return {
+        "n": int(keep.sum()),
+        "n_leaders": int(leader.sum()),
+        "n_non_leaders": int(non_leader.sum()),
+        "all": float(v.mf[keep].mean()) if keep.any() else float("nan"),
+        "leaders": float(v.mf[leader].mean()) if leader.any() else float("nan"),
+        "non_leaders": float(v.mf[non_leader].mean()) if non_leader.any() else float("nan"),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    import sys
+
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--design", nargs="+", required=True, help="one or more pilot labels, e.g. A1B0C1D1")
+    p.add_argument("--village", type=int, default=VILLAGE)
+    p.add_argument("--model", default=LLMs.GPT_5_4_NANO.value, choices=[m.value for m in LLMs])
+    p.add_argument("--reps", type=int, default=1, help="replicates per design (default: 1)")
+    p.add_argument("--first-rep", type=int, default=0, help="index of the first replicate (default: 0)")
+    p.add_argument("--seed", type=int, default=0, help="base seed; replicate r runs at seed + r, in every design")
+    p.add_argument("--rounds", type=int, default=None, help="default: the village's last trimester in panel.dta")
+    p.add_argument("--qn", type=float, default=QN)
+    p.add_argument("--qp", type=float, default=QP)
+    p.add_argument("--sweep", action="store_true", help="after T, ask everyone informed but never asked")
+    p.add_argument("--keep-isolates", action="store_true", help="do not prune to the giant component")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--features", type=Path, default=None)
+    p.add_argument("--profiles", type=Path, default=None)
+    p.add_argument("--root", type=Path, default=None)
+    p.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    p.add_argument("--overwrite", action="store_true", help="replace a CSV that is already there")
+    p.add_argument("--live", action="store_true", help="actually call the API (default: dry run, no calls, no cost)")
+    a = p.parse_args(argv)
+
+    llm = get_llm(a.model)
+    try:
+        designs = [(label.upper(), parse_design(label)) for label in a.design]
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
+    # Checked before anything is built, so a run that would refuse to write on
+    # its last replicate refuses now instead of after paying for the first.
+    if a.live and not a.overwrite:
+        clashes = [
+            run_path(a.village, label, llm, r, a.output_dir)
+            for label, _ in designs
+            for r in range(a.first_rep, a.first_rep + a.reps)
+            if run_path(a.village, label, llm, r, a.output_dir).exists()
+        ]
+        if clashes:
+            print(f"error: {len(clashes)} log(s) already exist, e.g. {clashes[0]}. "
+                  "Use --first-rep to run further replicates, or --overwrite.", file=sys.stderr)
+            return 1
+
+    leaders, households = build_village(
+        a.village, features_path=a.features, profiles_path=a.profiles,
+        root=a.root, giant_only=not a.keep_isolates,
+    )
+    pop = population(leaders, households)
+    A = adjacency_matrix(pop)
+
+    missing = missing_narratives(pop)
+    if missing and any("NARRATIVE" in design for _, design in designs):
+        print(f"error: {len(missing)} household(s) have no narrative profile (first few: {missing[:5]}), "
+              "and a NARRATIVE design needs one for every household it renders.", file=sys.stderr)
+        return 1
+
+    rounds = a.rounds if a.rounds is not None else default_rounds(a.village, root=a.root)
+    if not a.live:
+        print("DRY RUN -- no API calls made, nothing written. Add --live to run for real.\n")
+    print(f"v{a.village}: {len(pop)} households ({len(leaders)} leaders), T = {rounds}, model {llm.value}")
+    print(f"{len(designs)} design(s) x {a.reps} replicate(s) = at most {len(designs) * a.reps * len(pop):,} calls")
+    gt = ground_truth_rates(a.village, giant_only=not a.keep_isolates, root=a.root)
+    print(
+        f"ground truth: joined {gt['all']:.1%}, leaders {gt['leaders']:.1%} ({gt['n_leaders']}), "
+        f"non-leaders {gt['non_leaders']:.1%} ({gt['n_non_leaders']})\n"
+    )
+
+    # One call per household per replicate is the ceiling, not the count: a run
+    # asks only the households the information reaches, and by round T it has
+    # usually reached most but never all of them. So the bar is scaled to the
+    # ceiling and re-synced when each replicate ends, which is the same bargain
+    # the pilot's bar makes -- the fraction done understates, and the estimate of
+    # what is left stays honest across the replicates still to come.
+    runs = [(label, design, r) for label, design in designs for r in range(a.first_rep, a.first_rep + a.reps)]
+    bar = tqdm(total=len(runs) * len(pop), unit="call", desc="hybrid", dynamic_ncols=True)
+    done = 0  # calls the replicates so far were budgeted
+    try:
+        for index, (label, design, r) in enumerate(runs, start=1):
+            bar.set_description(f"v{a.village} {label} rep {r} [{index}/{len(runs)}]")
+            done += len(pop)
+            try:
+                result = hybrid_run(
+                    pop, A, design, llm,
+                    village=a.village, rounds=a.rounds, seed=a.seed + r, replicate=r,
+                    qN=a.qn, qP=a.qp, final_sweep=a.sweep, max_workers=a.workers,
+                    responder=None if a.live else _stub_responder,
+                    progress=bar,
+                )
+            finally:
+                # Re-sync rather than update: the replicate advanced the bar once
+                # per call it actually made, which is fewer than it was budgeted
+                # -- and fewer still if it raised part-way through.
+                bar.set_postfix_str("")
+                bar.update(max(0, done - bar.n))
+            # tqdm.write rather than print, so a summary landing between rounds
+            # does not cut through the bar.
+            tqdm.write(result.summary())
+            if result.parse_failures:
+                tqdm.write(f"  {len(result.parse_failures)} unparseable answer(s)")
+            if a.live:
+                path = write_decisions(result, run_path(a.village, label, llm, r, a.output_dir))
+                usage = result.usage()
+                tqdm.write(f"  -> {path}" + (f"  ({usage.get('total_tokens', 0):,} tokens)" if usage else ""))
+    finally:
+        bar.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
