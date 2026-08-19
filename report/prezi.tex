@@ -1,0 +1,569 @@
+% ---------------------------------------------------------------------------
+% Socialnetwork Diffusion with LLMs -- slide deck
+% Companion to report/main.tex. Build from this directory:
+%     pdflatex prezi.tex
+% Figures are pulled live out of ../figures/, so a re-run of any analysis
+% subcommand refreshes the deck without touching this file.
+% ---------------------------------------------------------------------------
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{metropolis}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{tikz}
+
+\setbeamerfont{footnote}{size=\tiny}
+\setbeamertemplate{itemize/enumerate body begin}{\footnotesize}
+\setbeamertemplate{itemize/enumerate subbody begin}{\scriptsize}
+\graphicspath{{../figures/}{./}}
+
+\setlength{\columnsep}{1.1em}
+\newcommand{\hl}[1]{\textcolor{mLightBrown}{#1}}
+\newcommand{\srcnote}[1]{{\tiny\color{gray}#1}}
+% every figure is capped in BOTH directions: the analysis plots are ~3:1, so
+% width alone overflows the slide.
+\newcommand{\fig}[2]{\includegraphics[width=\linewidth,height=#2\textheight,keepaspectratio]{#1}}
+\metroset{block=fill}
+
+\title{Socialnetwork Diffusion with LLMs}
+\subtitle{An LLM agent-based model over the BCDJ microfinance networks}
+\author{Vince Trencsenyi}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+% ===========================================================================
+% 1 -- Data interpretation
+% ===========================================================================
+\begin{frame}{Data interpretation}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.42\textwidth}
+      \scriptsize
+      \textbf{Modelling choices}
+      \begin{itemize}\scriptsize
+        \item Agents are \hl{households}; the individual
+              survey covers a median 46.8\% of a village.
+        \item Covariates kept as \hl{narrative grounding}, not as predictors:
+              wealth proxies, financial exposure (SHG, savings), in/out-group
+              standing (subcaste, religion).
+        \item \texttt{leader} is \hl{implied} in adoption, \hl{explicit} in
+              transmission -- it is what the seeding routine conditions on;
+              \texttt{adopted} likewise becomes conditional there.
+        \item \hl{Edge type dropped}: nothing records who told whom, so there is
+              no ground truth for which of the 12 relations carried influence.
+              We run on the \hl{union network}.
+        \item Also dropped: redundant, high-missingness, redacted, near-constant
+              and bare-identifier fields.
+      \end{itemize}
+    \end{column}
+    % the heatmap is near-square, so height is what binds, not width.
+    \begin{column}{0.56\textwidth}
+      \centering
+      \fig{feature_correlation_all_villages.png}{0.84}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 2 -- The two games
+% ===========================================================================
+\begin{frame}{Two decision-theoretic games}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Transmission $G^T=\langle A,S,P_i,U_i\rangle$}
+        \scriptsize
+        \emph{Will this household inform the neighbour?}
+        \begin{itemize}\scriptsize
+          \item $A=\{\text{YES},\ \text{NO}\}$
+          \item $S=\{\text{THEY JOIN},\ \text{THEY DON'T JOIN}\}$
+          \item $U_i$: subjective risk/reward;\ \ $P_i$: beliefs over $S$
+        \end{itemize}
+      \end{block}
+      \scriptsize
+      Played by every \texttt{informed} household, each turn, for each
+      not-yet-informed / not-yet-adopted neighbour $j\in N$.
+      \smallskip
+
+      Assumption: transmission is \hl{not a neutral act}. Consequences resemble a
+      coordination game --- \emph{if I joined and told them, and they join too, I
+      gain}.
+      \smallskip
+
+      \srcnote{Wider scope: an action space with intent ---
+        \textsc{endorse} / \textsc{inform} / \textsc{oppose} / \textsc{ignore}.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Adoption $G^A=\langle A,S,P_i,U_i\rangle$}
+        \scriptsize
+        \emph{Will this household adopt microfinance?}
+        \begin{itemize}\scriptsize
+          \item $A=\{\text{YES},\ \text{NO}\}$
+          \item $S=\{\text{BENEFICIAL},\ \text{LIMITED},\ \text{HARMFUL}\}$
+          \item $U_i$: subjective risk/reward;\ \ $P_i$: beliefs over $S$
+        \end{itemize}
+      \end{block}
+      \scriptsize
+      Played once, whenever a household becomes \texttt{informed}.
+      \smallskip
+
+      $S$ is the time-agnostic coarsening of what a loan does to a household's
+      finances: positive (house improvement), neutral (balance transfer),
+      negative (misuse, debt spiral).
+      \smallskip
+
+      \srcnote{BCDJ factorise diffusion into the same two conditionally
+        independent decisions --- a 7-parameter logit and a 2-parameter
+        Bernoulli. We substitute one factor at a time.}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 3 -- Agent architecture
+% ===========================================================================
+\begin{frame}{Agent architecture: a structured wrapper, not off-the-shelf agency}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.54\textwidth}
+      \scriptsize
+      \textbf{1. The loop I would build --- OODA}
+      \begin{itemize}\scriptsize
+        \item \hl{Observe} --- neighbour states, what was said, village context
+        \item \hl{Orient} --- household profile, priors, in/out-group standing
+        \item \hl{Decide} --- the game above, over an explicit utility structure
+        \item \hl{Act} --- adopt, or tell a specific neighbour
+      \end{itemize}
+      Models cognitive \emph{and} physical features and carries environmental
+      uncertainty explicitly. Strongly structured architectures (old-school
+      Wooldridge) \hl{wrapping} LLMs, rather than assuming inherent agency.
+      \medskip
+
+      \textbf{2. The loop actually implemented}
+      \begin{itemize}\scriptsize
+        \item \hl{Receive} --- one transmission is delivered
+        \item \hl{Decide} --- one LLM call, one decision
+        \item \hl{Advance} --- state update, next round
+      \end{itemize}
+      Loosely OODA-shaped, but sequential and stateless. Full OODA was cut for
+      time and complexity, not because it is the wrong model.
+      \medskip
+
+      \srcnote{Simplifying assumptions taken from the original authors to save
+        runtime: agents are informed once, decide once, and process one
+        transmission at a time.}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \centering
+      % --- drop the OODA figure in here (e.g. ooda.png in this directory) ---
+      % \fig{ooda.png}{0.7}
+      \begin{tikzpicture}
+        \draw[dashed,gray,thick] (0,0) rectangle (6.4,4.6);
+        \node[gray] at (3.2,2.3) {\scriptsize\itshape [OODA loop figure]};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 4 -- Three axes
+% ===========================================================================
+\begin{frame}{What varies: three axes}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.32\textwidth}
+      \begin{block}{1. Information set}
+        \scriptsize
+        \emph{What the agent is told.}
+        \begin{itemize}\scriptsize
+          \item Own profile (A)
+          \item Neighbour's profile (B)
+          \item Endorsement (C) / leader (L)
+        \end{itemize}
+        Each at three levels of richness: absent, listed facts, or an LLM-written
+        narrative fixed per household id.
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{2. Instruction design}
+        \scriptsize
+        \emph{How the agent is asked to reason.}
+        \begin{itemize}\scriptsize
+          \item Plain (D0)
+          \item Model of appropriateness (D1)
+          \item Decision-theoretic (D2)
+        \end{itemize}
+        Drawn from cognitive theory and decision theory --- not prompt
+        engineering folklore.
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{3. LLM choice}
+        \scriptsize
+        \emph{Who is answering.}
+        \begin{itemize}\scriptsize
+          \item \texttt{gpt-4.1-nano}, \texttt{gpt-5-nano}
+          \item \texttt{gpt-5.4-nano} (primary)
+          \item \texttt{gpt-5.6-luna}
+          \item \texttt{grok-4.20}, \texttt{grok-4.1-fast}
+        \end{itemize}
+        Non-reasoning models, so hidden processes do not confound the
+        prompt-design effect.
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vfill
+  \srcnote{\texttt{gpt-5.4-nano} is the primary agent: cheapest recent SOTA API
+    model, fast, and in game-theoretic work smaller models tend to behave more
+    human-like. Claude is absent only because it does not accept the same strict
+    JSON schema through the OpenAI-compatible API.}
+\end{frame}
+
+% ===========================================================================
+% 5 -- Prompt design mapping
+% ===========================================================================
+\begin{frame}{The prompt design grid: A\,B\,C/L\,D}
+  \centering\scriptsize
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Axis} & \textbf{0} & \textbf{1} & \textbf{2} \\
+    \midrule
+    \textbf{A} --- ego profile     & no household info      & data as a listing        & LLM-written narrative \\
+    \textbf{B} --- neighbour profile & no neighbour info    & data as a listing        & LLM-written narrative \\
+    \textbf{C} --- endorsement \emph{(adoption)}   & decision not mentioned & neighbour's decision given & --- \\
+    \textbf{L} --- leader \emph{(transmission)}    & not a seed             & seeded by the MFI          & --- \\
+    \textbf{D} --- response format & plain                  & model of appropriateness & decision-theoretic \\
+    \bottomrule
+  \end{tabular}
+
+  \vfill
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.47\textwidth}
+      \scriptsize
+      \textbf{D1 --- model of appropriateness.} The agent answers, in order:
+      \begin{enumerate}\scriptsize
+        \item What kind of situation is this?
+        \item What kind of person am I?
+        \item What should someone like me do in a situation like this?
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \scriptsize
+      \textbf{D2 --- decision-theoretic.} The agent must return a strict JSON
+      schema populating the decision matrix of $G^A$/$G^T$ --- $P_i$ over $S$,
+      $U_i$ over $A\times S$ --- \hl{with a justification per cell}, then choose.
+      \smallskip
+
+      \srcnote{This is what makes the reasoning auditable: the decision can be
+        checked against the agent's \emph{own} matrix.}
+    \end{column}
+  \end{columns}
+  \vfill
+  \srcnote{Adoption: $3\times3\times2\times3 = 54$ designs. Transmission: the
+    same grid with C replaced by the conditional L.}
+\end{frame}
+
+% ===========================================================================
+% 6 -- Three experiments
+% ===========================================================================
+\begin{frame}{Three experiments, increasing autonomy}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.32\textwidth}
+      \begin{block}{Pilot}
+        \scriptsize
+        \emph{Which prompt design is worth paying for?}
+        \begin{itemize}\scriptsize
+          \item No simulation loop --- two hand-built contrastive samples from
+                village 6: one real adopter, one real non-adopter.
+          \item Full factorial, both games, $n=25$ reps/arm.
+          \item Fisher's exact per design, FDR-corrected.
+          \item Plus: do D2 designs \hl{obey their own matrix}?
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{Hybrid}
+        \scriptsize
+        \emph{Does an LLM beat a fitted logit at take-up?}
+        \begin{itemize}\scriptsize
+          \item BCDJ's Bernoulli transmission at $q_N,q_P$, transliterated
+                unchanged.
+          \item \hl{Only adoption is an LLM call} --- that single substitution is
+                the whole experiment, which is what licenses attributing any gap
+                to it.
+          \item Mirror arm (LLM transmission, algorithmic adoption):
+                \texttt{NotImplementedError}.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{Full LLM}
+        \scriptsize
+        \emph{Can an ABM with zero fitted parameters reach a 2-parameter
+        structural model?}
+        \begin{itemize}\scriptsize
+          \item Adoption \hl{and} per-edge transmission are both LLM calls.
+          \item Seeded only at the empirical leaders; BCDJ's timing kept.
+          \item Scored against real take-up \emph{and} BCDJ's logit on the same
+                network.
+          \item Six models, two villages.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 7 -- Adoption pilot
+% ===========================================================================
+\begin{frame}{Pilot I --- adoption}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.60\textwidth}
+      \fig{pilot/adoption/adoption_rates_fisher.png}{0.36}\\[0.5em]
+      \fig{pilot/adoption/dt_rationality.png}{0.40}
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \scriptsize
+      \textbf{11 of 51 designs} separate a real adopter from a real non-adopter
+      at $q<0.05$; \hl{one inverts} (right of the red line).
+      \medskip
+
+      Only \hl{two} survivors are non-endorsed --- the agents pick up far more
+      from the \emph{neighbour's decision} than from the demographic data.%
+      \footnote{\srcnote{On this sample pair. Needs an in-depth analysis before
+        it becomes a claim.}}
+      \medskip
+
+      \textbf{The D2 audit.} 700 parsed matrices; 91\% put $EU(Y)>EU(N)$, yet the
+      decision matches the agent's own argmax only \hl{70\%} of the time --- and
+      the 28\% that break it break it by answering \emph{no} to their own
+      \emph{yes}.
+      \medskip
+
+      Forcing reasoning through a semi-formal bottleneck buys legibility, and
+      immediately exposes the inconsistency it made visible.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 8 -- Transmission pilot
+% ===========================================================================
+\begin{frame}{Pilot II --- transmission}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.42\textwidth}
+      \fig{pilot/transmission/transmission_rates_fisher_merged_lowest5ratio.png}{0.62}\\[0.3em]
+      \srcnote{Top 5 lowest-rate designs, L0/L1 pooled. Dashed/solid lines are
+        the paper's fitted $q_P=0.35$ and $q_N=0.05$.}
+    \end{column}
+    \begin{column}{0.56\textwidth}
+      \scriptsize
+      No ground truth here --- \hl{transmission is observed nowhere in the
+      bundle}. BCDJ never observed it either: $q_N,q_P$ are identified from the
+      adoption pattern with informed status integrated out. So the comparison is
+      to the paper's fitted rates, and the test is \hl{face validity only}.
+      \smallskip
+
+      Lean designs land close: \texttt{A1B0D2} gives $0.24/0.06$ against the
+      paper's $0.35/0.05$, preserving the taker/non-taker asymmetry. Richer
+      profiles (\texttt{A2B2D2}, \texttt{A0B2D2}) inflate \hl{both} rates and
+      wash the asymmetry out.
+      \smallskip
+
+      \textbf{The D2 audit is worse here:} 899 parsed matrices, only \hl{55\%}
+      consistent with their own argmax --- 42\% say \emph{no} where their own
+      matrix says \emph{yes}.%
+      \footnote{\srcnote{A gap our logical-enhancement frameworks are built to
+        close.}}
+
+      \fig{pilot/transmission/dt_rationality.png}{0.30}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 9 -- Hybrid
+% ===========================================================================
+\begin{frame}{Hybrid --- incomplete, and instructive}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.55\textwidth}
+      \fig{hybrid/adoption_by_design.png}{0.39}\\[0.3em]
+      \fig{hybrid/household_auc.png}{0.36}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \scriptsize
+      \textbf{The failure, plainly.} All 8 designs overshoot village 6's real
+      take-up by \hl{2.0--4.0$\times$} (23.4\% $\to$ 46--94\%); BCDJ's logit sits
+      at 18.9\%. Nor is it a ranking problem behind a level problem:
+      \hl{AUC is 0.50--0.64}, only 1 of 8 keeps its interval above chance, and
+      \hl{8 of 8} put leaders above non-leaders where the truth is 13.6\% against
+      25.9\%.
+      \smallskip
+
+      \textbf{Where the divergence may come from}
+      \begin{itemize}\scriptsize
+        \item The pilot scored a \emph{contrast} between two curated samples; the
+              loop demands an absolute \emph{level}, and nothing calibrates it.
+        \item The pilot separated mostly through endorsement (C); under BCDJ's
+              Bernoulli flood almost everyone is informed, so C fires everywhere
+              and stops discriminating.
+        \item Mechanism transfer is not free: context-sampling-to-LLM and
+              LLM-to-LLM behave differently from
+              \hl{algorithmic-transmission-to-LLM}.
+        \item The mirror arm was never run, so the ablation that would localise
+              this is missing.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 10 -- Village 6
+% ===========================================================================
+\begin{frame}{Full LLM --- village 6 \ \srcnote{(\texttt{A1B0C0D2}--\texttt{A0B0D2})}}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.68\textwidth}
+      \fig{full_llm/v6_A1B0C0D2-A0B0D2_models_adoption_rates.png}{0.36}\\[0.3em]
+      \fig{full_llm/v6_A1B0C0D2-A0B0D2_models_transmission_rates.png}{0.36}
+    \end{column}
+    \begin{column}{0.30\textwidth}
+      \scriptsize
+      One design pair, six models, $n=107$ households.
+      \smallskip
+
+      \textbf{Smaller is closer.} \texttt{gpt-4.1-nano} lands at 32\% against a
+      23.4\% truth and beats the BCDJ logit on true-positive rate. Newer
+      \texttt{gpt-5-nano} / \texttt{gpt-5.6-luna} hit 82--92\%, and their true
+      negative rate collapses to 8--19\%.
+      \smallskip
+
+      \textbf{Everyone gets leaders backwards.} Truth: leaders 13.6\%,
+      non-leaders 25.9\%. Every model --- \hl{and BCDJ's own logit} --- puts
+      leaders on top.
+      \smallskip
+
+      \textbf{Transmission.} \texttt{gpt-5.4-nano} is the only model near the
+      paper's rates (19\% vs $q_P$ 45\% / $q_N$ 9\%) and the only one keeping the
+      taker asymmetry. The rest fire on 79--95\% of eligible edges: everyone
+      tells everyone, and the network stops mattering.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 11 -- Village 73
+% ===========================================================================
+\begin{frame}{Full LLM --- village 73, out of sample}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.68\textwidth}
+      \fig{full_llm/v73_A1B0C0D2-A0B0D2_models_adoption_rates.png}{0.37}\\[0.4em]
+      \fig{full_llm/v73_A1B0C0D2-A0B0D2_models_transmission_rates.png}{0.37}
+    \end{column}
+    \begin{column}{0.30\textwidth}
+      \scriptsize
+      Same configuration, \hl{denser network, $n=170$}. Nothing was re-tuned.
+      \smallskip
+
+      \textbf{Why this village.} Village 73 \hl{flips the leader gap}: leaders
+      adopt at 30.0\% against non-leaders' 16.0\%, the opposite of the average
+      case. A second axis for asking whether responses are grounded in the data
+      at all.
+      \smallskip
+
+      \textbf{The honest reading.} Every model puts leaders above non-leaders
+      here too --- so they now agree with the truth, but for the \emph{same}
+      reason they contradicted it in village 6. This is a constant prior on
+      status, not sensitivity to the village.
+      \smallskip
+
+      The level story transfers unchanged: \texttt{gpt-4.1-nano} at 27\% against
+      a 17.6\% truth, everything newer at 54--88\%.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ===========================================================================
+% 12 -- What an LLM buys
+% ===========================================================================
+\begin{frame}{What could an LLM actually buy us here?}
+  \begin{block}{1. Mechanism, not just fit}
+    \scriptsize
+    A calibrated, verified agent produces a reasoning trace that is a
+    \emph{plausible} account of why this household joined --- the kind of
+    explanation a human would give in the same circumstances. Two fitted numbers,
+    $q_N$ and $q_P$, cannot say anything about why.
+  \end{block}
+  \begin{block}{2. Latent heterogeneity the covariates do not carry}
+    \scriptsize
+    The best single covariate explains $R^2=0.009$ of adoption. If social
+    context, in/out-group standing and who-told-you matter, an LLM is one of the
+    few ways to enter them into the model at all --- and it can generate
+    counterfactual populations, not merely re-fit the observed one.
+  \end{block}
+  \begin{block}{3. Portability without a fitted parameter}
+    \scriptsize
+    The full-LLM model has \hl{zero fitted parameters}: it ran on village 73
+    untouched. A structural model must be re-estimated per setting --- that is
+    the trade this study is pricing.
+  \end{block}
+  \vfill
+  \srcnote{\textbf{Not yet demonstrated.} Current results show sensitivity to
+    social context but \hl{no advantage over the simpler model}: levels overshoot
+    2--4$\times$, household ranking is near chance, the leader effect is a prior
+    rather than a reading of the data, and D2 traces contradict their own
+    matrices 30--45\% of the time. Stronger claims need reasoning ground truth.}
+\end{frame}
+
+% ===========================================================================
+% 13 -- Stretch
+% ===========================================================================
+\begin{frame}{Stretch target: a Western comparison population}
+  \scriptsize
+  The structure this study needs is \hl{demographics $+$ network $+$ observed
+  adoption}. For a WEIRD population that combination is essentially unavailable
+  off the shelf --- but experimental economics has close cousins, where the
+  demographics are collected and ``adoption'' is a recorded choice under a known
+  incentive structure.
+  \smallskip
+
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Candidate paradigms}
+        \scriptsize
+        \begin{itemize}\scriptsize
+          \item \textbf{Public goods games} --- contribution and conditional
+                cooperation; the nearest analogue to take-up under social
+                influence.
+          \item \textbf{Sequential / multi-stage games} --- trust, centipede,
+                bargaining: the same decision-under-a-signal shape as $G^A$.
+          \item \textbf{Market entry games} --- coordination with a congestion
+                externality, close to $G^T$.
+          \item \textbf{Signalling games} --- for the endorsement channel (C)
+                that drove the pilot separation.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{What transfers, what does not}
+        \scriptsize
+        \begin{itemize}\scriptsize
+          \item \hl{Transfers:} the agent architecture, the prompt-design grid,
+                the D2 self-consistency audit, the whole scoring apparatus.
+          \item \hl{Does not:} the real social network. Lab populations are
+                anonymous and randomly rematched --- the topology would have to
+                be commissioned, or recovered from a field experiment.
+        \end{itemize}
+      \end{block}
+      \scriptsize
+      \textbf{Centaur} (Binz et al., 2024) is the proof the direction is
+      tractable: one model fine-tuned across 160 experiments, predicting held-out
+      human behaviour including in \emph{unseen} paradigms. The natural benchmark
+      --- and a natural source of the behavioural ground truth this study lacks.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[standout]
+  Thank you
+\end{frame}
+
+\end{document}
