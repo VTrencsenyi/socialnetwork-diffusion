@@ -176,9 +176,9 @@ def load_models(
 def model_colours(models: list[str]) -> dict[str, str]:
 	"""One hue per model, in `SERIES` order, never cycled.
 
-	Past the palette's five slots every extra model takes the same grey, exactly
-	as `analysis.design_colours` does: six lines that no longer separate under
-	CVD is a worse figure than two figures of five.
+	Past the palette's six slots every extra model takes the same grey, exactly
+	as `analysis.design_colours` does: seven bars that no longer separate under
+	CVD is a worse figure than two figures of six.
 	"""
 	return {model: (SERIES[i] if i < len(SERIES) else OVERFLOW) for i, model in enumerate(models)}
 

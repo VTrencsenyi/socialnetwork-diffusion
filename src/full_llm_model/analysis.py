@@ -122,12 +122,20 @@ HAIRLINE = "#e1e0d9"
 # One hue per design pair, assigned in this fixed order and never cycled. The
 # first two are the house PARTICIPANT/INFO; the rest continue the reference
 # categorical order. Validated as a set for the light surface:
-#   node validate_palette.js "#eb6834,#2a78d6,#1baf7a,#eda100,#e87ba4" \
+#   node validate_palette.js "#eb6834,#2a78d6,#1baf7a,#eda100,#e87ba4,#008300" \
 #       --mode light --surface "#fcfcfb"   -> all checks pass
 # Three slots WARN on contrast against the light surface, so the relief rule
 # applies and every bar carries a visible value label.
-SERIES = ("#eb6834", "#2a78d6", "#1baf7a", "#eda100", "#e87ba4")
-OVERFLOW = MUTED  # a 6th design onward: one grey, labelled as unresolved
+#
+# The sixth slot is the reference order's green, added when a sixth *model* was
+# run under the shared design pair. Appending rather than re-stepping is what
+# keeps the first five where they were: `model_colours` hands hues out by index,
+# so no figure already drawn changes colour. The grey below is the wrong answer
+# for a model -- `BASELINE` is also grey, and the paper's bar sits in the same
+# adoption figure, so a sixth model in `OVERFLOW` would read as a second
+# reference rather than as a result.
+SERIES = ("#eb6834", "#2a78d6", "#1baf7a", "#eda100", "#e87ba4", "#008300")
+OVERFLOW = MUTED  # a 7th design onward: one grey, labelled as unresolved
 
 # The paper's own model gets the palette's neutral slot rather than a hue out of
 # SERIES: it is not one more design competing for a colour, it is the thing the
@@ -155,12 +163,9 @@ def agent_slug(model: LLMs) -> str:
 	"""The folder name for one agent, e.g. ``gpt_5.4_nano``.
 
 	`write_result` names the run directory from the model *value*, so this
-	mirrors that rather than `LLMs.name`, which differs (`gpt_5_4_nano`). An
-	OpenRouter value is a `vendor/model` slug, and its slash is flattened too --
-	a path separator here would push the run one directory deeper than every
-	other model's and break the one-folder-per-agent layout this returns.
+	mirrors that rather than `LLMs.name`, which differs (`gpt_5_4_nano`).
 	"""
-	return model.value.replace("-", "_").replace("/", "_")
+	return model.value.replace("-", "_")
 
 
 def agent_root(model: LLMs, output_dir: Path | str = OUTPUT_DIR) -> Path:
@@ -367,9 +372,9 @@ def load_full_runs(
 def design_colours(pairs: list[str]) -> dict[str, str]:
 	"""One hue per design pair, in `SERIES` order, never cycled.
 
-	Past the palette's five slots the extra designs all take one grey. That is
+	Past the palette's six slots the extra designs all take one grey. That is
 	deliberately unhelpful: the fix is to plot fewer design pairs at a time,
-	not to invent a sixth hue that no longer separates under CVD.
+	not to invent a seventh hue that no longer separates under CVD.
 	"""
 	return {pair: (SERIES[i] if i < len(SERIES) else OVERFLOW) for i, pair in enumerate(pairs)}
 

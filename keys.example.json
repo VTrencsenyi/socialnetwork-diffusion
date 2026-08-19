@@ -16,11 +16,5 @@
     "base_url": "https://api.x.ai/v1",
     "organization": null,
     "project": null
-  },
-  "openrouter": {
-    "api_key": "sk-or-v1-...",
-    "base_url": "https://openrouter.ai/api/v1",
-    "organization": null,
-    "project": null
   }
 }

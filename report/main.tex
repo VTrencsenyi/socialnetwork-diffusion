@@ -184,7 +184,10 @@ Extended by additional newer and older models. Reasoning models heavily overesti
   \label{fig:transmission}
 \end{figure}
 
-\paragraph{Extension} To test out-of-sample-potential, the same configuration was run on \textbf{Village 73}, that involves higher capita and a denser network. In addition, while the average case entails lower adoption rates from ``leaders'', in this village this feature is flipped, providing us an additional axis for evaluating whether the responses are getting grounded in the data. -- see Figures~\ref{fig:adoption73}-~\ref{fig:transmission73}.
+\paragraph{Extension} To test out-of-sample-potential, the same configuration was run on \textbf{Village 73}, that involves higher capita and a denser network. In addition, while the average case entails lower adoption rates from ``leaders'', in this village this feature is flipped, providing us an additional axis for evaluating whether the responses are getting grounded in the data. -- see Figures~\ref{fig:adoption73}-~\ref{fig:transmission73}.\\
+
+
+\noindent In addition, we include alternative openai and xai models to test whether the ``smaller-better'' hypothesis transfers from game-theoretic experiments, and to evaluate how different models behave with the same configuration\footnote{This is an another entry for an in-depth analysis.}. We focus on ``non-reasoning'' models to avoid conflating their hidden processes with our prompt designs' effects and to avoid incurred cost explosion. Note, Claude models are not covered as they don't support the same JSON schema through the openai API, and, older non-reasoning models are no longer available. 
 
 \begin{figure}[h]
   \centering

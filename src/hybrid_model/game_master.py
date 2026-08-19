@@ -736,10 +736,7 @@ def get_prompt(
 # --------------------------------------------------------------------------
 
 # The pilot's models and the keys.json block each is reached through. All of
-# them speak the OpenAI Responses API; claude, grok and openrouter differ from
-# openai only by base_url. An openrouter value carries that gateway's own
-# `vendor/model` slug, which is why one model value here contains a slash --
-# `analysis.agent_slug` flattens it so the run directory stays one level deep.
+# them speak the OpenAI Responses API; claude and grok differ only by base_url.
 class LLMs(Enum):
     GPT_4_1_NANO = "gpt-4.1-nano"
     GPT_5_NANO = "gpt-5-nano"
@@ -747,7 +744,7 @@ class LLMs(Enum):
     GPT_5_6_LUNA = "gpt-5.6-luna"
     HAIKU_4_5 = "claude-haiku-4-5-20251001"
     GROK_4_2 = "grok-4.20-0309-non-reasoning"
-    GROK_4_1_FAST = "xai/grok-4.1-fast-non-reasoning"
+    GROK_4_1_FAST = "grok-4-1-fast-non-reasoning"
 
 
 PROVIDERS = {
@@ -757,7 +754,7 @@ PROVIDERS = {
     LLMs.GPT_5_6_LUNA: "openai",
     LLMs.HAIKU_4_5: "claude",
     LLMs.GROK_4_2: "grok",
-    LLMs.GROK_4_1_FAST: "openrouter",
+    LLMs.GROK_4_1_FAST: "grok",
 }
 
 # Which models this path has actually been run against, DT's strict schema
@@ -768,10 +765,10 @@ PROVIDERS = {
 WIRED_UP = frozenset({
     LLMs.GPT_4_1_NANO, LLMs.GPT_5_NANO, LLMs.GPT_5_4_NANO, LLMs.GPT_5_6_LUNA,
     LLMs.GROK_4_2,
-    # Wired but not yet run: no openrouter credential exists to call it with, so
-    # neither the plain nor the DT path has been exercised on this one. x.ai's
-    # own API does not serve a 4.1-fast, which is why it is routed through the
-    # gateway rather than alongside GROK_4_2.
+    # x.ai spells this one with hyphens where its own 4.20 ids use dots, and the
+    # dotted form the model is marketed under (`grok-4.1-fast-non-reasoning`)
+    # comes back 400 `Model not found` -- so the value here is the id that
+    # resolves, not the name.
     LLMs.GROK_4_1_FAST,
 })
 

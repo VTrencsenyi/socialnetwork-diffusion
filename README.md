@@ -30,11 +30,8 @@ cp keys.example.json keys.json           # then fill in the API keys you actuall
 ```
 
 `keys.json` carries one credential block per provider — `openai`, `claude`,
-`grok`, `openrouter` — and is gitignored. All but the first are reached through
-the same OpenAI client with `base_url` pointed elsewhere, so only the key and
-the URL differ. `openrouter` is a gateway rather than a lab, so the models
-routed through it carry its own `vendor/model` ids (`xai/grok-4.1-fast-non-reasoning`);
-the run directory flattens the slash.
+`grok` — and is gitignored. The last two are reached through the same OpenAI
+client with `base_url` pointed elsewhere, so only the key and the URL differ.
 A block you leave blank is simply a model you cannot run; the pilots report it
 and skip it rather than failing.
 
