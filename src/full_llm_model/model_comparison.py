@@ -200,6 +200,7 @@ def plot_model_adoption_rates(
 	outfile: Path | None = None,
 	dpi: int = 200,
 	baseline: pd.DataFrame | None = None,
+	footnote: bool = True,
 ) -> plt.Figure:
 	"""Overall / leader / non-leader adoption and the two conditional accuracies, per model."""
 	gt = ground_truth_rates(village, root=root)
@@ -232,7 +233,7 @@ def plot_model_adoption_rates(
 				 fontsize=13, color=INK, loc="left", pad=38)
 	extra = [Line2D([], [], color=INK, lw=1.6, label="human ground truth (empirical)")]
 	_pair_legend(ax, colours, rates, extra)
-	bottom = _footnote(fig,
+	caption = (
 		f"every model on this axis was run under {pair} and nothing else, which is what makes the comparison one. "
 		"bars are the mean over replicates, whiskers +/-1 SE of that mean (a model at one replicate gets none). "
 		f"{BASELINE_PAIR} is the paper's own prediction -- BCDJ's information model, diffusion_model.m unchanged, "
@@ -241,6 +242,7 @@ def plot_model_adoption_rates(
 		f"component, n={gt['n']}. TPR and TNR are sensitivity and specificity against v.mf on the same "
 		"population -- a model that adopts everyone scores TPR 1.0 and TNR 0.0, so the pair only means "
 		"something read together.")
+	bottom = _footnote(fig, caption) if footnote else 0.0
 	fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
 	_save(fig, outfile, dpi)
 	return fig
@@ -259,6 +261,7 @@ def plot_model_transmission_rates(
 	dpi: int = 200,
 	qN: float = QN,
 	qP: float = QP,
+	footnote: bool = True,
 ) -> plt.Figure:
 	"""Transmission rate over eligible edges, per model, against the paper's qN and qP."""
 	models = _model_order(rates)
@@ -300,7 +303,7 @@ def plot_model_transmission_rates(
 		for model in models if model in edges.index
 	)
 	unusable = int(rates["tx_unusable"].sum())
-	bottom = _footnote(fig,
+	caption = (
 		f"every model on this axis was run under {pair} and nothing else. eligible edge: informed sender, "
 		"never-informed target -- the only edge the model is ever asked about. errored or unparseable calls "
 		f"stay in the denominator as non-transmissions ({unusable} of {int(rates['tx_edges'].sum())} calls). "
@@ -309,6 +312,7 @@ def plot_model_transmission_rates(
 		"say nothing about leader against non-leader, and the all-edges bar is a mixture of the two weighted by "
 		"the model's own adoption level. no ground truth exists for this step: the bundle records no "
 		"who-told-whom, so this is a comparison against the paper's estimate, not a score.")
+	bottom = _footnote(fig, caption) if footnote else 0.0
 	fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
 	_save(fig, outfile, dpi)
 	return fig
@@ -328,6 +332,7 @@ def write_model_comparison(
 	views: tuple[str, ...] = ("adoption", "transmission"),
 	models: list[LLMs] | None = None,
 	dpi: int = 200,
+	footnote: bool = True,
 ) -> list[Path]:
 	"""Write the two cross-model figures into ``figures/full_llm/`` directly.
 
@@ -346,11 +351,13 @@ def write_model_comparison(
 	written: list[Path] = []
 	if "adoption" in views:
 		path = out_dir / f"v{village}_{pair}_models_adoption_rates.png"
-		plt.close(plot_model_adoption_rates(rates, pair=pair, village=village, root=root, outfile=path, dpi=dpi))
+		plt.close(plot_model_adoption_rates(rates, pair=pair, village=village, root=root, outfile=path,
+											dpi=dpi, footnote=footnote))
 		written.append(path)
 	if "transmission" in views:
 		path = out_dir / f"v{village}_{pair}_models_transmission_rates.png"
-		plt.close(plot_model_transmission_rates(rates, pair=pair, village=village, outfile=path, dpi=dpi))
+		plt.close(plot_model_transmission_rates(rates, pair=pair, village=village, outfile=path,
+												dpi=dpi, footnote=footnote))
 		written.append(path)
 	return written
 
@@ -367,13 +374,15 @@ def main(argv: list[str] | None = None) -> int:
 	p.add_argument("--root", type=Path, default=None)
 	p.add_argument("--figure-dir", type=Path, default=FIGURE_DIR)
 	p.add_argument("--dpi", type=int, default=200)
+	p.add_argument("--no-footnote", dest="footnote", action="store_false",
+				   help="draw the axes without the caption block underneath")
 	a = p.parse_args(argv)
 
 	views = ("adoption", "transmission") if a.view == "all" else (a.view,)
 	write_model_comparison(
 		pair=a.pair.upper(), village=a.village, output_dir=a.output_dir, root=a.root,
 		figure_dir=a.figure_dir, views=views,
-		models=[LLMs(m) for m in a.model] if a.model else None, dpi=a.dpi,
+		models=[LLMs(m) for m in a.model] if a.model else None, dpi=a.dpi, footnote=a.footnote,
 	)
 	return 0
 

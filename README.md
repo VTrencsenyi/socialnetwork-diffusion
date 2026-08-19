@@ -13,6 +13,10 @@ been mapped ~6 months beforehand, we know both the seeds and the true outcome.
 That makes it one of the few diffusion datasets with a real ground truth to score
 a simulation against.
 
+## Preview
+
+![Preview](figures/full_llm/v6_A1B0C0D2-A0B0D2_models_adoption_rates.png)
+
 # HOW TO RUN
 
 Everything is a module run from the repository root, `python -m src.<module>`.
