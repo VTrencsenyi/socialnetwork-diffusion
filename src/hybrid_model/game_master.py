@@ -738,6 +738,8 @@ def get_prompt(
 # The pilot's models and the keys.json block each is reached through. All three
 # speak the OpenAI Responses API; claude and grok differ only by base_url.
 class LLMs(Enum):
+    GPT_4_1_NANO = "gpt-4.1-nano"
+    GPT_5_NANO = "gpt-5-nano"
     GPT_5_4_NANO = "gpt-5.4-nano"
     GPT_5_6_LUNA = "gpt-5.6-luna"
     HAIKU_4_5 = "claude-haiku-4-5-20251001"
@@ -745,6 +747,8 @@ class LLMs(Enum):
 
 
 PROVIDERS = {
+    LLMs.GPT_4_1_NANO: "openai",
+    LLMs.GPT_5_NANO: "openai",
     LLMs.GPT_5_4_NANO: "openai",
     LLMs.GPT_5_6_LUNA: "openai",
     LLMs.HAIKU_4_5: "claude",
@@ -756,7 +760,7 @@ PROVIDERS = {
 # so wiring the next one up is an entry here and a run, not an edit to the
 # elicitation. `full_llm_model.game_master` gates its transmission call on the
 # same set.
-WIRED_UP = frozenset({LLMs.GPT_5_4_NANO, LLMs.GPT_5_6_LUNA})
+WIRED_UP = frozenset({LLMs.GPT_4_1_NANO, LLMs.GPT_5_NANO, LLMs.GPT_5_4_NANO, LLMs.GPT_5_6_LUNA})
 
 # The reasoning budget, for the models that take one. A reasoning model left at
 # its provider default spends most of a response thinking, and this study asks a
@@ -764,7 +768,14 @@ WIRED_UP = frozenset({LLMs.GPT_5_4_NANO, LLMs.GPT_5_6_LUNA})
 # thinking, and keeps the response short enough that MAX_OUTPUT_TOKENS stays as
 # far from binding as it was in the pilot. Absent from this map means the
 # parameter is not sent at all, which is what every model here did before.
+# `"none"` is a 5.1-generation value: gpt-5-nano rejects it with a 400 and takes
+# `"minimal"` as its floor, and gpt-4.1-nano is not a reasoning model at all and
+# rejects the parameter whatever its value -- so it is absent here rather than
+# set to anything. Leaving gpt-5-nano off this map is not a neutral default: at
+# its own default effort a DT prompt spends the whole output budget thinking and
+# returns no text, which `one_call` raises on and does not retry.
 REASONING_EFFORT = {
+    LLMs.GPT_5_NANO: "minimal",
     LLMs.GPT_5_6_LUNA: "none",
 }
 

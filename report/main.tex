@@ -4,27 +4,28 @@
 \usepackage{graphicx}
 \usepackage{natbib}
 \usepackage{hyperref}
+\usepackage{booktabs}
 
-\title{LLM Socialnetwork Diffusion\\ Technical Report}
+\title{Socialnetwork Diffusion with LLMs\\ Technical Report}
 \author{Vince Trencsenyi}
-\date{18 August 2026}
+\date{19 August 2026}
 
 \begin{document}
 
 \maketitle
 \vspace{-1.5em}
 
-\noindent\textit{Status report on an LLM-enhanced agent-based diffusion model over
-the BCDJ microfinance study \citep{Banerjee2013}}
+% \noindent\textit{Status report on an LLM-enhanced agent-based diffusion model over
+% the BCDJ microfinance study \citep{Banerjee2013}}
 
 \vspace{0.5em}
-\section{Data Interpretation}
+\section{Data Interpretation~\citep{Banerjee2013}}
 
-A trivial feature analysis based on covariance and variance coverage reveals that household covariates are not strong predictors of adoption rate in the traditional learning sense.
-However, in case of LLMs, we may still leverage the demographic information as wealth proxies (\texttt{rooms}, \texttt{beds}, per-capita variants, \texttt{electricity}, \texttt{own\_latrine}, \texttt{occupation\_head}), exposure/attitude to financial services (\texttt{has\_shg}, \texttt{has\_savings}), and in-group/out-group relations (\texttt{subcaste} and \texttt{religion}). In this variant, we consider \texttt{leadership} as an implied feature, rather than an explicit public attribute. This is follows from how the ``leaders'' were chosen based on their occupation, from intution that this feature would have a dominant influence. (Something to be properly investigated in a full project...). Finally, \texttt{adopted} becomes a conditional attribute in the transmission phase. Everything else is dropped: redundant or superseded fields, fields missing in high ratio of records, fields redacted at source, near-constant fields, and bare or vague identifiers.
+A trivial feature analysis based on covariance and variance coverage reveals that household covariates are not obvious, strong predictors of adoption and transmission rate in the typical machine learning sense.
+However, in case of LLMs, we may still leverage the demographic information as wealth proxies (\texttt{rooms}, \texttt{beds}, per-capita variants, \texttt{electricity}, \texttt{own\_latrine}, \texttt{occupation\_head}), exposure/attitude to financial services (\texttt{has\_shg}, \texttt{has\_savings}), and in-group/out-group relations (\texttt{subcaste} and \texttt{religion}). In this variant, we consider \texttt{leader} as an implied feature, rather than an explicit public attribute. This is follows from how the ``leaders'' were chosen based on their occupation, from the intuition that this feature would have a dominant influence when fed directly to a language model in the adoption phase\footnote{Something to be properly investigated in a full project....}. However, \texttt{leader} is incorporated as a conditional feature in the transmission phase, following from the paper's description of the seeding routine. Finally, \texttt{adopted} also becomes a conditional attribute in the transmission phase. Everything else is dropped: redundant or superseded fields, fields missing in high ratio of records, fields redacted at source, near-constant fields, and bare or vague identifiers.\\
 
 
-This study considers the above feature sets not as predictors of adoption, but as foundational traits for grounding the narrative capacity and heterogeneity of the LLMs in plausible, realistic context.
+\noindent This study considers the above feature sets not as direct predictors of adoption or transmission ratios, but as foundational traits for grounding the narrative capacity and heterogeneity of the LLMs in plausible, realistic context.
 
 \paragraph{Edge type} In particular, while the type of edge seem like potential predictors and narrative features, we choose not to use them in this variant. Nothing in the survey records who told whom, and the survey didn't ask for justifications. There is no ground truth for which of the twelve relationship types actually carried information or influence. Similarly to the original paper's implementation, here \texttt{informed} is a state, rather than a feature for inference. Consequently, the simulation also runs on the union network rather than trying to select or weight by edge type.
 
@@ -32,92 +33,165 @@ This study considers the above feature sets not as predictors of adoption, but a
 
 We take a decision-theoretic approach and seperate the mechanics into two simple ``games''.
 
-\textbf{Transmission}: Every \texttt{informed} household $i$, in each turn, for each (not yet adopted) neighbour $j \in N$ plays the transmission game $G^T = \langle A, S, U_i \rangle$, where the action space is $A=\{\text{ACTIVE},\text{PASSIVE}\}$, the states of nature are $S=\{\text{ADOPTED},\text{NOT ADOPTED}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent\footnote{Here using the network edge types would likely carry influence that stems from the personal relation of the agents.}. This model builds on the assumption that information transmission is not a neutral act, and the consequences of transmission will yield utility similar to a coordination game (something like~\citep{04edc235-2099-36a0-9888-daf1778d57e4}).
+\paragraph{Transmission}
+Every \texttt{informed} household $i$, in each turn, for each (not yet adopted) neighbour $j \in N$ plays the transmission game $G^T = \langle A, S, U_i \rangle$, where the action space -- in the context of the \textit{Will this household inform the neighbour?} decision scenario -- is $A=\{\text{YES},\text{NO}\}$, the states of nature are $S=\{\text{THEY JOIN},\text{THEY DON'T JOIN}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent\footnote{Here using the network edge types would likely carry influence that stems from the personal relation of the agents.}. 
+This model builds on the assumption that information transmission is not a neutral act -- e.g.~\citep{04edc235-2099-36a0-9888-daf1778d57e4} --, and the consequences of transmission will yield utility similar to a coordination game\footnote{Given a wider scope, I would have tested a version where the action space entails intentional influence: the agent can decide to endorse, inform, oppose, or ignore. }: \textit{If I decided to join and telling them about it, I influence my neighbour to join, I will experience satisfaction}.
 
-\textbf{Adoption}: Whenever a household $i$ gets \texttt{informed}, it plays the adoption game $G^A = \langle A, S, U_i \rangle$ where the action space -- where the question is \textit{Will this household adopt the microfinance services?} -- is $A=\{\text{YES},\text{NO}\}$, the states of nature pertaining to the potential effects on the household's financial circumstances are $S=\{\text{BENEFICIAL},\text{LIMITED},\text{HARMFUL}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent. Here, we follow the assumption that the humans will have weighted the potential personal consequences of having access to loans, which on a high-level and time agnostically, can be positive, neutral, or negative.
+\paragraph{Adoption}
+Whenever a household $i$ gets \texttt{informed}, it plays the adoption game $G^A = \langle A, S, U_i \rangle$ where the action space -- where the question is \textit{Will this household adopt the microfinance services?} -- is $A=\{\text{YES},\text{NO}\}$, the states of nature pertaining to the potential effects on the household's financial circumstances are $S=\{\text{BENEFICIAL},\text{LIMITED},\text{HARMFUL}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent. Here, we assume that humans will weigh the potential personal financial consequences of having access to loans, which, at a high level and time-agnostically, can be modelled in the simplest way as positive (e.g. it helps pay for house improvements), neutral (e.g. it is used as a balance transfer), or negative (e.g. the loan is misused and results in a debt spiral).
 
 \section{Agent Design}
 
-Agents are households, not individuals: the individual survey covers only median 46.8\% of a village, albeit non-randomly.
-We focus on households and household-aligned features.
-household-level representation avoids that, and is also what the
-time and resources here could support. 
-
+Agents are households, not individuals: the individual survey covers only median 46.8\% of a village, albeit non-randomly. We focus on households and household-aligned features.
 
 \paragraph{A Note on Implementation}
 I prefer to use strongly structured (as per old-school Wooldridge) agent architectures wrapping LLMs, rather than assuming inherent agency off-the shelf.
-This use case nicely aligns with the specific Observe--Orient--Decide--Act cycle I like to use where we can model cognitive and physical features, and account for environmental uncertainties.
-While the sequential model still follows this concept and the round protocol (receive, decide, advance) is loosely OODA-shaped, this is not implemented here due to the time and complexity overhead.
-Design choices here pertain to the use of a hybrid algorithmic+neural (LLM) agents or the purely synthetic autonomous LLM population (\textbf{W.I.P.}), and to a narrow selection of prompt designs covering ideas from information sets, cognitive theory and decision theory.
-
-\section{Experiment Design}
-
-The initial choice is \textbf{Village 6}. This is based on capita and edge count, not on data quality.
-At a five-round horizon its 730-edge network needs 3{,}650 edge-round calls against 7{,}824 (village 47)
-and 12{,}132 (village 73). The trade-off is the lower survey coverage of households.
-
-\textbf{Timing is not real}: $q_N,q_P$ were fit to reproduce the eventual adoption pattern, not a documented sequence of conversations.
-While we adpopt the rounds $=$ trimester presence count assumption from the papers, the household-level adoption record and the panel's trimester curve are two different empirical objects, so simulated trajectory is to beviewed as a modelling artefact (albeit interesting!) rather than objective measure of human-likeness in this study.
-
-\textbf{Adoption rate pilot.} Due to the cost and time constraints, we first conduct a pilot to narrow down agent selection for a more extensive simulation, scored on whether an LLM decision tells apart a real adopter from a real non-adopter, on \texttt{gpt-5.4-nano} at $n=20$ per axess (Figure~\ref{fig:pilot}).
-
+This specific dataset and use case would nicely align with the Observe--Orient--Decide--Act cycle I like to use where we can model cognitive and physical features, and account for environmental uncertainties.
+While the sequential model I implemented still follows this concept and the round protocol (receive, decide, advance) is loosely OODA-shaped, this is not implemented here due to the time and complexity overhead.
+Design choices here are limited to the use of hybrid agents that mix the social context processing abilities of LLMs with the clibration of the algorithmic models presented in the paper or the purely synthetic autonomous LLM population\footnote{However, even here, we take simplifying assumptions from the original authors to save on resources and runtime: agents are informed only once, agents decide only once, a single transmission is processed by each recipient at a time.}. Secondly, we investigate a narrow selection of prompt designs covering ideas from information sets, cognitive theory and decision theory as follows, for the adoption phase:
 \begin{description}
-    \item[Ego profile]:
+    \item[Ego profile (A)]: 
     \begin{description}
         \item[0]: No household info involved.
         \item[1]: Data incorporated as a listing.
-        \item[2]: Data incorporated as and engaging narrative story.   
+        \item[2]: Data incorporated as an engaging narrative story that was generated by an LLM before hand and fixed per household id.   
     \end{description}
-    \item[Neighbour profile]: Same as above.
-    \item[Endorsement]:
+    \item[Neighbour profile (B)]: Same as above.
+    \item[Endorsement (C)]:
     \begin{description}
         \item[0]: What the neighbour decided is not mentioned.
         \item[1]: The neighbour's decision is mentioned.  
     \end{description}
-    \item[Response format]:
+    \item[Response format (D)]:
     \begin{description}
         \item[0]Plain: Vanilla prompt.
         \item[1]Model of appropriateness: The agent answers 1. What kind of situation is this? 2. What kind of person am I? 3. What should someone like me do in a situation like this?
         \item[2]Decision-theoretic: The LLM must provide a structured JSON schema, populating a decision matrix according to the game definitions, providing a justification for each selected value.   
     \end{description}
 \end{description}
+The transmission phase follows the same approach, where C is replaced by a conditional parameter L(eader), used for the seeding prompts.
+
+\section{Experiment Design}
+
+\paragraph{Village 6} is selected as the initial target subset based on capita and edge count, not on data quality.
+At a five-round horizon its 730-edge network needs 3{,}650 edge-round calls against 7{,}824 (village 47)
+and 12{,}132 (village 73). The trade-off is the lower survey coverage of households and a flat trimester-based trajectory.
 
 
-Results from the pilot are consistent with an earlier finding in~\citep{Trencsenyi2025}, such that the complexity of the agent model and the human-likeness of the results do not have an obvious monotonic relationship, the evaluation is sensitive to metric and objective. Quite often higher complexity triggers the LLM being overly strategic making it less human-like.
+\paragraph{Timing artefact:} $q_N,q_P$ were fit to reproduce the eventual adoption pattern, not a documented sequence of conversations.
+While we adopt the rounds $=$ trimester presence count assumption from the papers, the household-level adoption record and the panel's trimester curve are two different empirical objects, so simulated trajectory is to be viewed as a modelling artefact (albeit interesting!) rather than objective measure of human-likeness in this study.
+
+\paragraph{LLM:} This study used \texttt{gpt-5.4-nano-2026-03-17}. It is the cheapest of the recent \textit{SOTA} API models\footnote{Models after 5.5 default to ``reasoning'' under the hood, while older 5.x models' hidden reasoning can't be reliable turnedd off}, fast in runtime, and, according to my experience with game-theoretic experiments, ``smaller'' models tend to be more human-like in their performance -- e.g. in~\citep{Trencsenyi2025}.
+
+\subsection{Pilots}
+Due to the cost and time constraints, we first conduct a pilot on both games to narrow down agent selection for a more extensive simulation. A search was conducted with $n=25$ repetitions with each parameter combination and using carefully selected real samples from village 6.
+
+\paragraph{Adoption Rates}
+
+The search is scored on whether an LLM decision tells apart a real adopter from a real non-adopter (Figure~\ref{fig:pilot}). An interesting highlight beside best performers is that only two non-endorsed configurations discriminate between samples, this implies that the agents tend to pick up more from the influence of the neighbours' decision than from the demographic data\footnote{Based on this samples. This requires an in depth analysis}. In addition, as Figure~\ref{fig:pilot-dt} depicts, inconsistencies appear when reasoning is forced through a semi-formal bottleneck.
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.92\textwidth]{../figures/pilot/adoption_rates_fisher.png}
+  \includegraphics[width=0.92\textwidth]{adoption_rates_fisher.png}
   \vspace{-0.3em}
-  \caption{Adoption rate by design, filtered by statistical significance, adopter vs.\ non-adopter sample
-  household, $n=20$ reps/arm. Grey: base cases. Red line: designs that invert.}
+  \caption{Adoption rate by design, filtered by statistical significance of discrimination, adopter vs.\ non-adopter sample household, $n=25$ reps/arm. Grey: base cases. Red line: designs that invert.}
   \label{fig:pilot}
 \end{figure}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{dt_rationality_a.png}
+  \vspace{-0.3em}
+  \caption{Rationality and consistency of LLM reasoning via decision theory in the adoption pilot.}
+  \label{fig:pilot-dt}
+\end{figure}
 
-For a full project, four extensions follow: log-probability shifts from
-SHG/bank-account toggles on engineered minimal pairs at temperature zero;
-folding the LOA questions into the decision-theoretic matrix;
-explicit belief elicitation (skipped by default -- it biased responses
-heavily toward one outcome); less-constrained and smaller models (both
-found more human-like in my previous studies); and whether leadership must be stated
-explicitly or can be inferred from occupation.
+\paragraph{Transmission Rates}
 
-\textbf{Hybrid model.} Of two transmission variants, one is built: each
-household is prompted once, when first informed, never again ---
-BCDJ's \texttt{contagiousbefore} rule exactly. The other, BCDJ's endorsement
-model (``how many told me''), is a stub (\texttt{NotImplementedError})
-pending a belief-update model; what exists is narrower, a toggle disclosing
-one informer's status. The true ``share of informers who joined'' is
-recoverable only from logs after a run, never shown to the agent. Runs are
-pruned to the giant component (village 6: 107/114), matching BCDJ's
-convention. Only \texttt{gpt-5.4-nano} is wired in, and no scorer against
-ground truth exists yet --- the run-record schema is built for one.
+We apply the same approach as above, focusing in transmission rates. Lacking ground truth, Figure~\ref{fig:pilot2} can be compared to findings from the paper. While some models approximate the algorithmic prediction, Figure~\ref{fig:pilot-dt2} indicates a high level of inconsistency~\footnote{Something our logical enchancement frameworks can aid with, e.g.~\cite{11272529}}.
 
-\textbf{Synthetic population} under construction, subject to results from hybrid.
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{transmission_rates_fisher_merged_lowest5ratio.png}
+  \vspace{-0.3em}
+  \caption{Transmission rate by design, filtered by statistical significance of discrimination, adopter vs.\ non-adopter sample household, top 5 lowest rates. $n=25$ reps/arm.}
+  \label{fig:pilot2}
+\end{figure}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{dt_rationality.png}
+  \vspace{-0.3em}
+  \caption{Rationality and consistency of LLM reasoning via decision theory in the transmission pilot.}
+  \label{fig:pilot-dt2}
+\end{figure}
 
-\section{First glance on potential stretch}
+\paragraph{Costs}
 
-The demographic-plus-network-plus-adoption structure here has cousins in experimental economics with WEIRD-population demographic data, a possible route to a Western comparison population via public goods games, and signalling games, or other canonical multi-stage-game sequential interaction models.
+See Table~\ref{tab:adoption-transmission}.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lcc}
+\hline
+\textbf{Axis} & \textbf{Adoption (in / out)} & \textbf{Transmission (in / out)} \\
+\hline
+A0 / A1 / A2
+& 448/252 $\cdot$ 531/287 $\cdot$ 910/283
+& 459/234 $\cdot$ 542/222 $\cdot$ 888/239 \\
+
+B0 / B1 / B2
+& 458/264 $\cdot$ 554/277 $\cdot$ 877/281
+& 450/222 $\cdot$ 541/232 $\cdot$ 899/240 \\
+
+C0 / C1 $|$ L0 / L1 
+& 625/274 $\cdot$ 634/275
+& 627/230 $\cdot$ 632/233 \\
+
+D0 / D1 / D2
+& 465/97 $\cdot$ 505/255 $\cdot$ 918/470
+& 501/126 $\cdot$ 542/183 $\cdot$ 847/385 \\
+\hline
+\end{tabular}
+\caption{Adoption and transmission counts across experimental axes.}
+\label{tab:adoption-transmission}
+\end{table}
+
+\subsection{Hybdrid model}
+
+We implement the paper's contagion algorithm to simulate the information transmission, while the LLMs take over for the decision-making on the adoption game. On the other side, LLMs are used to propagate the information, while adoption rates are replicated by the paper's model. The intention with this step is an ablation study that continuously places the agents into more complex situations, thus, informing model development and guiding model choice pruning for the more costly consecutive simulations. In this study, however, it was not completed due to lack of time. Instead, pilot and preliminary results, empirical observation, and intuition guided further modelling choices.
+
+\paragraph{Algorithmic Transmission with LLM Decision-makers}
+
+Preliminary poor results suggest a mismatch between the mechanism transfer in social-context-grounded-sampling-to-LLM or LLM-to-LLM vs. algorithmic-transmission-to-LLM. What seems to work in one settings, fails in the other.
+
+\paragraph{LLM-driven Diffusion with Algorithmic Adoption}
+
+\texttt{raise NotImplementedError()}
+
+\subsection{Synthetic LLM-driven Population}
+Extended by additional newer and older models. Reasoning models heavily overestimate adoption rates (Figure~\ref{fig:adoption}) and transmission rates (Figure~\ref{fig:transmission}).
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{v6_A1B0C0D2-A0B0D2_models_adoption_rates.png}
+  \vspace{-0.3em}
+  \caption{Adoption rates for fixed design for comparing models.}
+  \label{fig:adoption}
+\end{figure}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{v6_A1B0C0D2-A0B0D2_models_transmission_rates.png}
+  \vspace{-0.3em}
+  \caption{Transmission rates for fixed design for comparing models.}
+  \label{fig:transmission}
+\end{figure}
+
+\section{What does an LLM buy us here?}
+
+In the optimal case, where the agent is properly calibrated and implements the appropriate verification methods, we can claim that the produced natural language or formal reasoning traces are plausible explanations a human may give in the same circumstances. While stonger claims can only be made in presence of reasoning ground truth, the plausible explanations may capture empirical mechanisms and latent variance stemming from the social context that algorithmic solutions cannot model.
+
+\section{A glance on potential stretch targets}
+
+The demographic-plus-network-plus-adoption structure here has cousins in experimental economics with WEIRD-population demographic data, a possible route to a Western comparison population via public goods games, and signalling games, or other canonical multi-stage-game sequential interaction models. For a feel on potential general adaptability and transferability, see e.g.~\citep{binz2024centaur}.
 
 {\small
 \bibliographystyle{plainnat}
