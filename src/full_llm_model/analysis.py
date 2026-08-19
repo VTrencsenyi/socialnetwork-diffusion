@@ -155,9 +155,12 @@ def agent_slug(model: LLMs) -> str:
 	"""The folder name for one agent, e.g. ``gpt_5.4_nano``.
 
 	`write_result` names the run directory from the model *value*, so this
-	mirrors that rather than `LLMs.name`, which differs (`gpt_5_4_nano`).
+	mirrors that rather than `LLMs.name`, which differs (`gpt_5_4_nano`). An
+	OpenRouter value is a `vendor/model` slug, and its slash is flattened too --
+	a path separator here would push the run one directory deeper than every
+	other model's and break the one-folder-per-agent layout this returns.
 	"""
-	return model.value.replace("-", "_")
+	return model.value.replace("-", "_").replace("/", "_")
 
 
 def agent_root(model: LLMs, output_dir: Path | str = OUTPUT_DIR) -> Path:

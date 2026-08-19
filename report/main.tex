@@ -34,11 +34,11 @@ However, in case of LLMs, we may still leverage the demographic information as w
 We take a decision-theoretic approach and seperate the mechanics into two simple ``games''.
 
 \paragraph{Transmission}
-Every \texttt{informed} household $i$, in each turn, for each (not yet adopted) neighbour $j \in N$ plays the transmission game $G^T = \langle A, S, U_i \rangle$, where the action space -- in the context of the \textit{Will this household inform the neighbour?} decision scenario -- is $A=\{\text{YES},\text{NO}\}$, the states of nature are $S=\{\text{THEY JOIN},\text{THEY DON'T JOIN}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent\footnote{Here using the network edge types would likely carry influence that stems from the personal relation of the agents.}. 
+Every \texttt{informed} household $i$, in each turn, for each (not-yet-adopted or not-yet-informed) neighbour $j \in N$ plays the transmission game $G^T = \langle A, S, P_i, U_i \rangle$, where the action space -- in the context of the \textit{Will this household inform the neighbour?} decision scenario -- is $A=\{\text{YES},\text{NO}\}$, the states of nature are $S=\{\text{THEY JOIN},\text{THEY DON'T JOIN}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent\footnote{Here using the network edge types would likely carry influence that stems from the personal relation of the agents.}. Finally, $P_i$ are the probabilities that the agent associates to each state of nature.
 This model builds on the assumption that information transmission is not a neutral act -- e.g.~\citep{04edc235-2099-36a0-9888-daf1778d57e4} --, and the consequences of transmission will yield utility similar to a coordination game\footnote{Given a wider scope, I would have tested a version where the action space entails intentional influence: the agent can decide to endorse, inform, oppose, or ignore. }: \textit{If I decided to join and telling them about it, I influence my neighbour to join, I will experience satisfaction}.
 
 \paragraph{Adoption}
-Whenever a household $i$ gets \texttt{informed}, it plays the adoption game $G^A = \langle A, S, U_i \rangle$ where the action space -- where the question is \textit{Will this household adopt the microfinance services?} -- is $A=\{\text{YES},\text{NO}\}$, the states of nature pertaining to the potential effects on the household's financial circumstances are $S=\{\text{BENEFICIAL},\text{LIMITED},\text{HARMFUL}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent. Here, we assume that humans will weigh the potential personal financial consequences of having access to loans, which, at a high level and time-agnostically, can be modelled in the simplest way as positive (e.g. it helps pay for house improvements), neutral (e.g. it is used as a balance transfer), or negative (e.g. the loan is misused and results in a debt spiral).
+Whenever a household $i$ gets \texttt{informed}, it plays the adoption game $G^A = \langle A, S, P_i, U_i \rangle$ where the action space -- where the question is \textit{Will this household adopt the microfinance services?} -- is $A=\{\text{YES},\text{NO}\}$, the states of nature pertaining to the potential effects on the household's financial circumstances are $S=\{\text{BENEFICIAL},\text{LIMITED},\text{HARMFUL}\}$, and the subjective utilities $U$ represent a $\frac{\text{risk}}{\text{reward}}$ relation for the given agent. Here, we assume that humans will weigh the potential personal financial consequences of having access to loans, which, at a high level and time-agnostically, can be modelled in the simplest way as positive (e.g. it helps pay for house improvements), neutral (e.g. it is used as a balance transfer), or negative (e.g. the loan is misused and results in a debt spiral). As before, $P_i$ are the probabilities that the agent associates to each state of nature.
 
 \section{Agent Design}
 
@@ -77,18 +77,17 @@ The transmission phase follows the same approach, where C is replaced by a condi
 At a five-round horizon its 730-edge network needs 3{,}650 edge-round calls against 7{,}824 (village 47)
 and 12{,}132 (village 73). The trade-off is the lower survey coverage of households and a flat trimester-based trajectory.
 
-
 \paragraph{Timing artefact:} $q_N,q_P$ were fit to reproduce the eventual adoption pattern, not a documented sequence of conversations.
 While we adopt the rounds $=$ trimester presence count assumption from the papers, the household-level adoption record and the panel's trimester curve are two different empirical objects, so simulated trajectory is to be viewed as a modelling artefact (albeit interesting!) rather than objective measure of human-likeness in this study.
 
-\paragraph{LLM:} This study used \texttt{gpt-5.4-nano-2026-03-17}. It is the cheapest of the recent \textit{SOTA} API models\footnote{Models after 5.5 default to ``reasoning'' under the hood, while older 5.x models' hidden reasoning can't be reliable turnedd off}, fast in runtime, and, according to my experience with game-theoretic experiments, ``smaller'' models tend to be more human-like in their performance -- e.g. in~\citep{Trencsenyi2025}.
+\paragraph{LLM:} This study used \texttt{gpt-5.4-nano-2026-03-17} as a starting point. It is the cheapest of the recent \textit{SOTA} API models\footnote{Models after 5.5 default to ``reasoning'' under the hood, while older 5.x models' hidden reasoning can't be reliable turned off}, fast in runtime, and, according to my experience with game-theoretic experiments, ``smaller'' models tend to be more human-like in their performance -- e.g. in~\citep{Trencsenyi2025}.
 
 \subsection{Pilots}
 Due to the cost and time constraints, we first conduct a pilot on both games to narrow down agent selection for a more extensive simulation. A search was conducted with $n=25$ repetitions with each parameter combination and using carefully selected real samples from village 6.
 
 \paragraph{Adoption Rates}
 
-The search is scored on whether an LLM decision tells apart a real adopter from a real non-adopter (Figure~\ref{fig:pilot}). An interesting highlight beside best performers is that only two non-endorsed configurations discriminate between samples, this implies that the agents tend to pick up more from the influence of the neighbours' decision than from the demographic data\footnote{Based on this samples. This requires an in depth analysis}. In addition, as Figure~\ref{fig:pilot-dt} depicts, inconsistencies appear when reasoning is forced through a semi-formal bottleneck.
+The search is scored on whether an LLM decision tells apart a real adopter from a real non-adopter (Figure~\ref{fig:pilot}). An interesting highlight beside best performers is that only two non-endorsed configurations discriminate between samples, this implies that the agents tend to pick up more from the influence of the neighbours' decision than from the demographic data\footnote{Based on this sample set. This requires an in depth analysis}. In addition, as Figure~\ref{fig:pilot-dt} depicts, inconsistencies appear when reasoning is forced through a semi-formal bottleneck.
 
 \begin{figure}[h]
   \centering
@@ -174,20 +173,43 @@ Extended by additional newer and older models. Reasoning models heavily overesti
   \centering
   \includegraphics[width=0.92\textwidth]{v6_A1B0C0D2-A0B0D2_models_adoption_rates.png}
   \vspace{-0.3em}
-  \caption{Adoption rates for fixed design for comparing models.}
+  \caption{Village 6 adoption rates for fixed design for comparing models.}
   \label{fig:adoption}
 \end{figure}
 \begin{figure}[h]
   \centering
   \includegraphics[width=0.92\textwidth]{v6_A1B0C0D2-A0B0D2_models_transmission_rates.png}
   \vspace{-0.3em}
-  \caption{Transmission rates for fixed design for comparing models.}
+  \caption{Village 6 transmission rates for fixed design for comparing models.}
   \label{fig:transmission}
+\end{figure}
+
+\paragraph{Extension} To test out-of-sample-potential, the same configuration was run on \textbf{Village 73}, that involves higher capita and a denser network. In addition, while the average case entails lower adoption rates from ``leaders'', in this village this feature is flipped, providing us an additional axis for evaluating whether the responses are getting grounded in the data. -- see Figures~\ref{fig:adoption73}-~\ref{fig:transmission73}.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{v73_A1B0C0D2-A0B0D2_models_adoption_rates.png}
+  \vspace{-0.3em}
+  \caption{Village 73 adoption rates for fixed design for comparing models.}
+  \label{fig:adoption73}
+\end{figure}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.92\textwidth]{v73_A1B0C0D2-A0B0D2_models_transmission_rates.png}
+  \vspace{-0.3em}
+  \caption{Village 73 transmission rates for fixed design for comparing models.}
+  \label{fig:transmission73}
 \end{figure}
 
 \section{What does an LLM buy us here?}
 
-In the optimal case, where the agent is properly calibrated and implements the appropriate verification methods, we can claim that the produced natural language or formal reasoning traces are plausible explanations a human may give in the same circumstances. While stonger claims can only be made in presence of reasoning ground truth, the plausible explanations may capture empirical mechanisms and latent variance stemming from the social context that algorithmic solutions cannot model.
+This study tested whether replacing fixed probabilities with context-sensitive artificial households improves our ability to reproduce how microfinance spread through a real village network, introducing individual-based decision-models and social-context-driven heterogeneity. However, current early results show potential sensitivity to social context, but not yet a demonstrated advantage over simpler models.\\
+
+
+\noindent In the optimal case, where the agent is properly calibrated and implements the appropriate verification methods, we can claim that the produced natural language or formal reasoning traces are plausible explanations a human may give in the same circumstances. While stronger claims can only be made in presence of reasoning ground truth, the plausible explanations may capture empirical mechanisms and latent variance stemming from the social context that algorithmic solutions cannot model. \\
+
+
+\noindent The pilots and the single village experiments highlight the potential, but also show inconsistencies in the produced reasoning samples and consequent choices, which indicates a weaker grounding effect in the demogrpahic data.
 
 \section{A glance on potential stretch targets}
 

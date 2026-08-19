@@ -14,6 +14,14 @@ is a single argument here and not a loop.
 They land in ``figures/full_llm/`` directly rather than in an agent folder: a
 figure that spans every agent belongs to none of them.
 
+Neither figure carries a caption block under the axes, and neither takes a flag
+to add one. These two are the write-up's summary plots: they go into the report
+inside a ``figure`` environment that supplies its own LaTeX caption, so a
+footnote here is the same prose printed twice, at a size the PDF shrinks below
+legibility. The denominators and the provenance of every reference line are
+stated in this docstring instead -- that is where a reader of the code looks,
+and the report is where a reader of the figure looks.
+
 **adoption_rates** -- the same five splits `analysis.plot_adoption_rates`
 draws, with the same two references: the human ground truth as an ink line
 (village 6 happened once, so it is a datum and not a distribution) and BCDJ's
@@ -63,7 +71,6 @@ try:
 		OVERFLOW,
 		SERIES,
 		SURFACE,
-		_footnote,
 		_grouped_bars,
 		_pair_legend,
 		_save,
@@ -86,7 +93,6 @@ except ImportError:  # running as a script, not a package
 		OVERFLOW,
 		SERIES,
 		SURFACE,
-		_footnote,
 		_grouped_bars,
 		_pair_legend,
 		_save,
@@ -187,6 +193,20 @@ def _title(village: int, pair: str, question: str) -> str:
 	return f"Village {village}, {pair} -- {question}"
 
 
+def _title_pad(entries: int) -> float:
+	"""Clearance under the title for a key that may have wrapped past two rows.
+
+	`_pair_legend` lays out three columns once there are more than four entries,
+	so a fifth model is what pushes the key onto a third row -- a pad fixed at
+	the two-row height would be printed over by it. Mirrors that column rule
+	rather than measuring the drawn legend: the arithmetic is the same and needs
+	no renderer.
+	"""
+	ncols = entries if entries <= 4 else 3
+	rows = -(-entries // ncols)
+	return 38.0 + 14.0 * max(0, rows - 2)
+
+
 # --------------------------------------------------------------------------
 # Plot 1: adoption, against the humans and against the paper's own model
 # --------------------------------------------------------------------------
@@ -200,7 +220,6 @@ def plot_model_adoption_rates(
 	outfile: Path | None = None,
 	dpi: int = 200,
 	baseline: pd.DataFrame | None = None,
-	footnote: bool = True,
 ) -> plt.Figure:
 	"""Overall / leader / non-leader adoption and the two conditional accuracies, per model."""
 	gt = ground_truth_rates(village, root=root)
@@ -229,21 +248,11 @@ def plot_model_adoption_rates(
 					va="center", fontsize=7.5, color=INK, zorder=6)
 
 	_style_axis(ax, "rate")
-	ax.set_title(_title(village, pair, "final adoption level by model, against the humans and the paper"),
-				 fontsize=13, color=INK, loc="left", pad=38)
 	extra = [Line2D([], [], color=INK, lw=1.6, label="human ground truth (empirical)")]
+	ax.set_title(_title(village, pair, "final adoption level by model, against the humans and the paper"),
+				 fontsize=13, color=INK, loc="left", pad=_title_pad(len(colours) + len(extra)))
 	_pair_legend(ax, colours, rates, extra)
-	caption = (
-		f"every model on this axis was run under {pair} and nothing else, which is what makes the comparison one. "
-		"bars are the mean over replicates, whiskers +/-1 SE of that mean (a model at one replicate gets none). "
-		f"{BASELINE_PAIR} is the paper's own prediction -- BCDJ's information model, diffusion_model.m unchanged, "
-		"under their pooled 43-village logit, simulated on this village's real network; its whisker is +/-1 SD "
-		"over seeds, the spread of one realisation rather than the precision of a mean. denominator: giant "
-		f"component, n={gt['n']}. TPR and TNR are sensitivity and specificity against v.mf on the same "
-		"population -- a model that adopts everyone scores TPR 1.0 and TNR 0.0, so the pair only means "
-		"something read together.")
-	bottom = _footnote(fig, caption) if footnote else 0.0
-	fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+	fig.tight_layout()
 	_save(fig, outfile, dpi)
 	return fig
 
@@ -261,7 +270,6 @@ def plot_model_transmission_rates(
 	dpi: int = 200,
 	qN: float = QN,
 	qP: float = QP,
-	footnote: bool = True,
 ) -> plt.Figure:
 	"""Transmission rate over eligible edges, per model, against the paper's qN and qP."""
 	models = _model_order(rates)
@@ -290,30 +298,11 @@ def plot_model_transmission_rates(
 	# these models happened to do: this figure is meant to be read next to the
 	# per-agent ones, and a rescaled axis would make a quiet model look loud.
 	_style_axis(ax, "transmission rate (of eligible edges)")
-	ax.set_title(_title(village, pair, "who tells whom, by model, against the paper's qN and qP"),
-				 fontsize=13, color=INK, loc="left", pad=38)
 	extra = [Line2D([], [], color=INK, lw=1.6, label="BCDJ estimate (solid where it applies)")]
+	ax.set_title(_title(village, pair, "who tells whom, by model, against the paper's qN and qP"),
+				 fontsize=13, color=INK, loc="left", pad=_title_pad(len(colours) + len(extra)))
 	_pair_legend(ax, colours, rates, extra)
-
-	logged = rates.loc[rates["tx_edges"] > 0]  # a replicate with no edge log is not a zero-edge replicate
-	edges = logged.groupby("pair")["tx_edges"].mean()
-	landed = logged.groupby("pair")["tx_landed_rate"].mean()
-	volume = "; ".join(
-		f"{model}: {edges[model]:.0f} edges/replicate, {landed[model]:.0%} of them landed"
-		for model in models if model in edges.index
-	)
-	unusable = int(rates["tx_unusable"].sum())
-	caption = (
-		f"every model on this axis was run under {pair} and nothing else. eligible edge: informed sender, "
-		"never-informed target -- the only edge the model is ever asked about. errored or unparseable calls "
-		f"stay in the denominator as non-transmissions ({unusable} of {int(rates['tx_edges'].sum())} calls). "
-		f"{volume}. qN={qN:.2f} and qP={qP:.2f} are BCDJ's published point estimates (Main_models_1_3.m, pooled "
-		"over 43 villages) for a non-adopter's and an adopter's per-round chance of speaking over an edge; they "
-		"say nothing about leader against non-leader, and the all-edges bar is a mixture of the two weighted by "
-		"the model's own adoption level. no ground truth exists for this step: the bundle records no "
-		"who-told-whom, so this is a comparison against the paper's estimate, not a score.")
-	bottom = _footnote(fig, caption) if footnote else 0.0
-	fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+	fig.tight_layout()
 	_save(fig, outfile, dpi)
 	return fig
 
@@ -332,7 +321,6 @@ def write_model_comparison(
 	views: tuple[str, ...] = ("adoption", "transmission"),
 	models: list[LLMs] | None = None,
 	dpi: int = 200,
-	footnote: bool = True,
 ) -> list[Path]:
 	"""Write the two cross-model figures into ``figures/full_llm/`` directly.
 
@@ -352,12 +340,12 @@ def write_model_comparison(
 	if "adoption" in views:
 		path = out_dir / f"v{village}_{pair}_models_adoption_rates.png"
 		plt.close(plot_model_adoption_rates(rates, pair=pair, village=village, root=root, outfile=path,
-											dpi=dpi, footnote=footnote))
+											dpi=dpi))
 		written.append(path)
 	if "transmission" in views:
 		path = out_dir / f"v{village}_{pair}_models_transmission_rates.png"
 		plt.close(plot_model_transmission_rates(rates, pair=pair, village=village, outfile=path,
-												dpi=dpi, footnote=footnote))
+												dpi=dpi))
 		written.append(path)
 	return written
 
@@ -374,15 +362,13 @@ def main(argv: list[str] | None = None) -> int:
 	p.add_argument("--root", type=Path, default=None)
 	p.add_argument("--figure-dir", type=Path, default=FIGURE_DIR)
 	p.add_argument("--dpi", type=int, default=200)
-	p.add_argument("--no-footnote", dest="footnote", action="store_false",
-				   help="draw the axes without the caption block underneath")
 	a = p.parse_args(argv)
 
 	views = ("adoption", "transmission") if a.view == "all" else (a.view,)
 	write_model_comparison(
 		pair=a.pair.upper(), village=a.village, output_dir=a.output_dir, root=a.root,
 		figure_dir=a.figure_dir, views=views,
-		models=[LLMs(m) for m in a.model] if a.model else None, dpi=a.dpi, footnote=a.footnote,
+		models=[LLMs(m) for m in a.model] if a.model else None, dpi=a.dpi,
 	)
 	return 0
 

@@ -7,8 +7,9 @@ judgement, written down: a hand-checked map of raw spelling -> canonical
 spelling, one per village, applied by a script so the merge is reproducible and
 reversible rather than a hand-edited CSV.
 
-    python src/subcaste.py --villages 6
+    python src/subcaste.py --villages 6 73
     -> output/features/CLEANED_hh_features_6.csv
+       output/features/CLEANED_hh_features_73.csv
 
 The cleaned file is the feature table byte-for-byte, except that `subcaste`
 holds the canonical spelling and a new `subcaste_raw` column immediately after
@@ -26,13 +27,16 @@ Four rules, applied in this order, and they are the whole of what is claimed:
    `KEPT_APART` with the reason, so the decision is on the record either way.
 2. **`caste` is a cross-check, not a constraint.** The individual file's
    administrative caste (OBC / SC / ST / General) is an independent read on
-   whether two strings name one group, and 11 of the 14 merges below agree with
-   it exactly. It is not treated as binding, because it is not a clean partition
-   of the raw strings to begin with: in village 6 the *single* spelling
-   `VOKKALIGA` is reported as GENERAL by two respondents and OBC by ten, and
-   `ROMAN CATHOLIC` spans GENERAL, `DO NOT KNOW` and blank. The three merges
-   that cross a caste label (`VOKKALIGA`, `BALAJIGAS`, `BUDUGA JANGAMA`) are
-   named in `KEPT_APART`'s notes with the reading taken.
+   whether two strings name one group, and 11 of village 6's 14 merges plus all
+   3 of village 73's agree with it exactly. It is not treated as binding,
+   because it is not always a clean partition of the raw strings to begin with:
+   in village 6 the *single* spelling `VOKKALIGA` is reported as GENERAL by two
+   respondents and OBC by ten, and `ROMAN CATHOLIC` spans GENERAL, `DO NOT KNOW`
+   and blank. The three merges that cross a caste label (`VOKKALIGA`,
+   `BALAJIGAS`, `BUDUGA JANGAMA`) are named in `KEPT_APART`'s notes with the
+   reading taken. Village 73 is the easier case and shows what the cross-check
+   looks like when it works: there each of the 17 spellings carries exactly one
+   caste, so every merge below either agrees with it or is forbidden outright.
 3. **The canonical form is attested.** It is always a string that occurs in this
    village, so the map can be checked against the raw file without knowing how
    the name "should" be spelled. Ties break toward the singular over the plural,
@@ -112,6 +116,57 @@ ALIASES: dict[int, dict[str, tuple[str, ...]]] = {
         # noted as such.
         "SYED": ("SAYYAD", "SAIHADH"),
     },
+    # Village 73: 17 distinct strings over 217 interviewed individuals (no
+    # `-999`), which collapse to 12 groups; at household level, 15 raw strings
+    # over 94 surveyed households collapse to 11, and singletons fall from 8 to
+    # 3. Counts in the comments are individuals, from
+    # `individual_characteristics.csv`, as in village 6.
+    #
+    # Unlike village 6, `caste` is a *clean* partition of the raw strings here:
+    # every one of the 17 spellings carries exactly one administrative caste, so
+    # rule 2's cross-check either agrees with a merge or forbids it outright, and
+    # all three merges below agree with it exactly.
+    73: {
+        # The same Naik / Nayak / Nayaka bundle as village 6, three spellings
+        # instead of five, all SCHEDULED TRIBE. `NAYAKA` is the canonical there
+        # too, which matters: the two villages' cleaned tables are read side by
+        # side, and a group that is NAYAKA in one and NAYAK in the other would be
+        # two groups to anything comparing them. Rule 3 is satisfied
+        # independently -- `NAYAKA` is attested here (1 individual, 1 household)
+        # and is the fuller spelling -- so the cross-village agreement is a
+        # consequence of the rule, not a thumb on it. 20 individuals once
+        # merged, 8 households.
+        "NAYAKA": ("NAIK", "NAYAK"),
+        # Brahmin, three transliterations, all GENERAL. No plural and no
+        # initialism to break the tie, so this falls to the same reading as
+        # `BALAJIGAS` in village 6: frequency decides, and `BRAMANA` has 4 of the
+        # 6 individuals against one each for the others. `BRAMHINA` is arguably
+        # the fuller spelling -- it keeps both the H-cluster and the final -A --
+        # and is the one line here to revisit if the canonical looks wrong; note
+        # that `BRAHMIN`, the spelling a reader would reach for first, is
+        # deliberately *not* canonical, because choosing it would be knowing how
+        # the name should be spelled rather than reading what this village said.
+        # `BRAHMIN` occurs in the individual file only, so no household row turns
+        # on it.
+        "BRAMANA": ("BRAHMIN", "BRAMHINA"),
+        # Kannada honorific plural `-ru`, exactly as `KORACHA`/`KORACHARU` in
+        # village 6, both OBC. Singular attested (2) and commoner than the plural
+        # (1), so rule 3's two tiebreaks agree.
+        "THIGALA": ("THIGALARU",),
+        # Not merged, and not for want of a candidate: `BHAJANTHRI` (1, SC) is
+        # the same washerman-adjacent musician caste that village 6 spells
+        # `BAJANTHRI`/`BAJANTRI`, but it is the only spelling attested here, so
+        # rule 4 returns it unchanged and rule 3 forbids importing village 6's
+        # canonical. The consequence is real and is the price of per-village
+        # maps: `BAJANTHRI` in village 6 and `BHAJANTHRI` in village 73 are one
+        # community under two strings, and anything pooling villages must merge
+        # them itself rather than trust either cleaned file to have done it.
+        # `ADI KARNATAKA` (64, SC), `VANNIKULA` (64, OBC), `VOKKALIGA` (33, OBC),
+        # `BHOVI` (18, SC) and `LINGAYATH` (2, GENERAL) likewise each occur in a
+        # single spelling -- village 6's `A.K` and `VAKKALIGA` have no analogue
+        # here -- so the four largest groups in the village are untouched by this
+        # map and the merges only ever reach its tail.
+    },
 }
 
 # Pairs a reader would reasonably expect to be merged, and deliberately are not.
@@ -163,6 +218,56 @@ KEPT_APART: dict[int, tuple[tuple[str, str, str], ...]] = {
             "the single spelling VOKKALIGA (2 GENERAL, 10 OBC), so it says nothing "
             "about the merge; Budga Jangam is ST in Karnataka's list, so the SC "
             "row is read as respondent error rather than as a second group.",
+        ),
+    ),
+    73: (
+        (
+            "NAYAKA",
+            "VALMIKI NAYAKA",
+            "The hardest call in this village, and it is settled by consistency "
+            "with village 6's WALMIKI entry above rather than by ethnography: "
+            "Karnataka lists the ST community as 'Valmiki Nayaka', and this "
+            "string carries the canonical head word verbatim, so the argument for "
+            "merging is stronger here than it was there. It is still refused. "
+            "Rule 1 admits suffixes, transliterations, initialisms and dropped "
+            "syllables, not a qualifying prefix; MADIVAL AGASAR -> MADIVAL is the "
+            "one qualified merge in the map and it absorbs a *synonym* of its head "
+            "word, where 'Valmiki' is a second name. Merging would also drop a "
+            "distinction the respondent made, which is exactly why CHITTI BANAJIGA "
+            "stayed out of BALAJIGAS. 2 individuals, 2 households; subcaste_raw "
+            "makes the opposite reading a one-line change.",
+        ),
+        (
+            "NAYAKA",
+            "BYADAR NAYAKA",
+            "Same shape as VALMIKI NAYAKA and refused for the same reason, with "
+            "one addition that makes it the clearer refusal of the two: Byadar / "
+            "Bedar is a distinct ST community in Karnataka's list, not a synonym "
+            "of Nayaka, so merging would not be a spelling decision at all. Both "
+            "are SCHEDULED TRIBE, so rule 2 cannot separate them. 1 individual, "
+            "and no household -- the string reaches the cleaned file only through "
+            "the individual-level counts quoted above.",
+        ),
+        (
+            "VANNIKULA",
+            "THIGALA",
+            "'Vanniyakula Kshatriya' is the formal name of the community Karnataka "
+            "also lists as Tigala, so these two arguably name one OBC group -- and "
+            "they are the second-largest and one of the smallest groups in the "
+            "village, so the merge would visibly change the distribution (28 + 3 "
+            "households). Refused as two names rather than two spellings, which is "
+            "rule 1's whole point; recorded here because a reader who knows the "
+            "setting will expect it and should see that it was decided, not "
+            "missed.",
+        ),
+        (
+            "VOKKALIGA",
+            "GOWDA",
+            "'Gowda' is a title carried by Vokkaliga households (and by others), "
+            "not a spelling of 'Vokkaliga'. Both OBC, so rule 2 is silent. 3 "
+            "individuals, 1 household. Left as given for the same reason MUSLIMS "
+            "and SHIYA were in village 6: the string records what the respondent "
+            "answered, and a title is not evidence of the subcaste underneath it.",
         ),
     ),
 }

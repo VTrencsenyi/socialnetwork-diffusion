@@ -563,7 +563,10 @@ def write_result(result: FullRunResult, output_dir: Path | str = OUTPUT_DIR) -> 
 	is one folder, matching where `analysis.py` puts that pair's figures.
 	"""
 	run = result.run
-	root = Path(output_dir) / run.llm.replace("-", "_") / pair_slug(run.design, result.transmission_design)
+	root = (
+		Path(output_dir) / run.llm.replace("-", "_").replace("/", "_")
+		/ pair_slug(run.design, result.transmission_design)
+	)
 	root.mkdir(parents=True, exist_ok=True)
 	stem = f"v{run.village}_rep{run.replicate}"
 	adoption_path, transmission_path = root / f"{stem}_adoption.csv", root / f"{stem}_transmission.csv"

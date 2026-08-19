@@ -30,8 +30,11 @@ cp keys.example.json keys.json           # then fill in the API keys you actuall
 ```
 
 `keys.json` carries one credential block per provider — `openai`, `claude`,
-`grok` — and is gitignored. The last two are reached through the same OpenAI
-client with `base_url` pointed elsewhere, so only the key and the URL differ.
+`grok`, `openrouter` — and is gitignored. All but the first are reached through
+the same OpenAI client with `base_url` pointed elsewhere, so only the key and
+the URL differ. `openrouter` is a gateway rather than a lab, so the models
+routed through it carry its own `vendor/model` ids (`xai/grok-4.1-fast-non-reasoning`);
+the run directory flattens the slash.
 A block you leave blank is simply a model you cannot run; the pilots report it
 and skip it rather than failing.
 
@@ -67,6 +70,9 @@ strict superset of a facts file. `output/profiles/profiles_<village>.json` is
 the single source of truth for anything profile-shaped. The subcaste step is
 optional — village 6's shipped profiles were built from the raw feature table,
 not the cleaned one, so keep `--features-dir output/features` to reproduce them.
+`src.subcaste` has a reviewed alias map for villages 6 and 73 only, and raises
+for any other village rather than writing a "cleaned" copy of the raw table;
+`python -m src.subcaste` with no `--villages` does both.
 
 ## 2. The pilots — which prompt design to use
 
@@ -131,6 +137,11 @@ It takes a design pair — one adoption label, one transmission label.
 python -m src.full_llm_model.game_master --adoption A1B0C1D0 --transmission A0B0D2
 python -m src.full_llm_model.game_master --adoption A1B0C1D0 --transmission A0B0D2 --reps 20 --live
 ```
+
+`--model` takes any id in `LLMs` (default `gpt-5.4-nano`); the model must be
+listed in `WIRED_UP` in `src/hybrid_model/game_master.py`, which is where a new
+one is added — an `LLMs` member, a `PROVIDERS` entry naming its `keys.json`
+block, and a line in `WIRED_UP`.
 
 Logs land in `output/full_llm/<model>/<adoption>-<transmission>/`, and the
 figures mirror that path exactly under `figures/full_llm/`.
